@@ -51,7 +51,27 @@ use thiserror::Error;
 /// Re-exported from [`astrid_types`]. SDK-specific types like [`CallerContext`]
 /// are also available here.
 pub mod types {
-    pub use astrid_types::*;
+    // Sub-modules (re-exported for `astrid_sdk::types::ipc::*` access)
+    pub use astrid_types::ipc;
+    pub use astrid_types::kernel;
+    pub use astrid_types::llm;
+
+    // IPC types
+    pub use astrid_types::ipc::{
+        IpcMessage, IpcPayload, OnboardingField, OnboardingFieldType, SelectionOption,
+    };
+
+    // Kernel API types
+    pub use astrid_types::kernel::{
+        CapsuleMetadataEntry, CommandInfo, KernelRequest, KernelResponse, LlmProviderInfo,
+        SYSTEM_SESSION_UUID,
+    };
+
+    // LLM types
+    pub use astrid_types::llm::{
+        ContentPart, LlmResponse, LlmToolDefinition, Message, MessageContent, MessageRole,
+        StopReason, StreamEvent, ToolCall, ToolCallResult, Usage,
+    };
 
     use serde::{Deserialize, Serialize};
 
