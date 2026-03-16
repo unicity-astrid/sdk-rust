@@ -32,6 +32,7 @@
 //! | [`elicit`]      | N/A              | Interactive install/upgrade prompts    |
 //! | [`identity`]    | N/A              | Platform user identity resolution      |
 //! | [`approval`]    | N/A              | Human approval for sensitive actions   |
+//! | [`types`]       | N/A              | IPC payload types and LLM schemas      |
 
 #![allow(unsafe_code)]
 #![allow(missing_docs)]
@@ -45,6 +46,24 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
+/// Shared Astrid data types (IPC payloads, LLM schemas, kernel API).
+///
+/// Re-exported from [`astrid_types`]. SDK-specific types like [`CallerContext`]
+/// are also available here.
+pub mod types {
+    pub use astrid_types::*;
+
+    use serde::{Deserialize, Serialize};
+
+    /// Identifies the user and session that triggered the current capsule execution.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct CallerContext {
+        /// Session ID, if available.
+        pub session_id: Option<String>,
+        /// User ID, if available.
+        pub user_id: Option<String>,
+    }
+}
 pub use borsh;
 pub use serde;
 pub use serde_json;
@@ -678,8 +697,6 @@ pub mod cron {
         Ok(())
     }
 }
-
-pub mod types;
 
 /// Capsule configuration (like `std::env`).
 ///
