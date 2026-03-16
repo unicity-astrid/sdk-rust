@@ -51,6 +51,8 @@ use thiserror::Error;
 /// Re-exported from [`astrid_types`]. SDK-specific types like [`CallerContext`]
 /// are also available here.
 pub mod types {
+    use serde::{Deserialize, Serialize};
+
     // Sub-modules (re-exported for `astrid_sdk::types::ipc::*` access)
     pub use astrid_types::ipc;
     pub use astrid_types::kernel;
@@ -72,8 +74,6 @@ pub mod types {
         ContentPart, LlmResponse, LlmToolDefinition, Message, MessageContent, MessageRole,
         StopReason, StreamEvent, ToolCall, ToolCallResult, Usage,
     };
-
-    use serde::{Deserialize, Serialize};
 
     /// Identifies the user and session that triggered the current capsule execution.
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,7 +475,7 @@ pub mod kv {
                          version {current_version} - cannot safely read"
                     )))
                 }
-            },
+            }
             // Malformed envelope: __sv present but data missing or __sv not a number.
             (true, _, _) => Err(SysError::ApiError(
                 "malformed versioned envelope: __sv field present but \
@@ -517,12 +517,12 @@ pub mod kv {
                 let migrated = migrate_fn(raw, stored_version)?;
                 set_versioned(key, &migrated, current_version)?;
                 Ok(Some(migrated))
-            },
+            }
             Versioned::Unversioned(raw) => {
                 let migrated = migrate_fn(raw, 0)?;
                 set_versioned(key, &migrated, current_version)?;
                 Ok(Some(migrated))
-            },
+            }
             Versioned::NotFound => Ok(None),
         }
     }
@@ -592,7 +592,7 @@ pub mod kv {
                 Versioned::Current(data) => {
                     assert_eq!(data.name, "hello");
                     assert_eq!(data.count, 42);
-                },
+                }
                 other => panic!("expected Current, got {other:?}"),
             }
         }
@@ -609,7 +609,7 @@ pub mod kv {
                     assert_eq!(stored_version, 1);
                     assert_eq!(raw["name"], "old");
                     assert_eq!(raw["count"], 1);
-                },
+                }
                 other => panic!("expected NeedsMigration, got {other:?}"),
             }
         }
@@ -634,7 +634,7 @@ pub mod kv {
                 Versioned::Unversioned(val) => {
                     assert_eq!(val["name"], "legacy");
                     assert_eq!(val["count"], 99);
-                },
+                }
                 other => panic!("expected Unversioned, got {other:?}"),
             }
         }
