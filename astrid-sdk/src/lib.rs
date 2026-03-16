@@ -51,6 +51,8 @@ use thiserror::Error;
 /// Re-exported from [`astrid_types`]. SDK-specific types like [`CallerContext`]
 /// are also available here.
 pub mod types {
+    use serde::{Deserialize, Serialize};
+
     // Sub-modules (re-exported for `astrid_sdk::types::ipc::*` access)
     pub use astrid_types::ipc;
     pub use astrid_types::kernel;
@@ -72,8 +74,6 @@ pub mod types {
         ContentPart, LlmResponse, LlmToolDefinition, Message, MessageContent, MessageRole,
         StopReason, StreamEvent, ToolCall, ToolCallResult, Usage,
     };
-
-    use serde::{Deserialize, Serialize};
 
     /// Identifies the user and session that triggered the current capsule execution.
     #[derive(Debug, Clone, Serialize, Deserialize)]
