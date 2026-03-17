@@ -15,7 +15,7 @@ extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ImplItem, ItemImpl, LitStr};
+use syn::{ImplItem, ItemImpl};
 
 /// Marks an `impl` block as the entry point for an Astrid Capsule.
 ///
@@ -25,6 +25,31 @@ use syn::{ImplItem, ItemImpl, LitStr};
 #[proc_macro_attribute]
 pub fn capsule(attr: TokenStream, item: TokenStream) -> TokenStream {
     capsule_impl(attr.into(), item.into()).into()
+}
+
+/// Extract doc comments from a list of attributes, joining all lines.
+///
+/// `/// Foo` becomes `#[doc = " Foo"]` — we strip the leading space and
+/// join with newlines so the full documentation is preserved.
+fn extract_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut lines = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("doc")
+            && let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+        {
+            let line = s.value();
+            lines.push(line.strip_prefix(' ').unwrap_or(&line).to_string());
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n").trim().to_string())
+    }
 }
 
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
@@ -39,6 +64,9 @@ fn capsule_impl(
     let struct_name = &input.self_ty.clone();
 
     let is_stateful = attr.to_string().trim() == "state";
+
+    // Extract doc comments from the impl block as the capsule-level description.
+    let capsule_description = extract_doc_comments(&input.attrs);
 
     let mut tool_arms = Vec::new();
     let mut command_arms = Vec::new();
@@ -73,10 +101,20 @@ fn capsule_impl(
                 }
             });
 
-            // Determine if this method is marked as mutable (check before iterating)
-            let is_mutable = extracted_attrs
+            // Determine if this method is marked as mutable.
+            // Supported forms:
+            //   #[astrid::mutable]                    (standalone, legacy)
+            //   #[astrid::tool("name", mutable)]      (inline, preferred)
+            //   #[astrid::tool(mutable)]              (inline, name inferred)
+            let has_standalone_mutable = extracted_attrs
                 .iter()
                 .any(|a| a.path().segments[1].ident == "mutable");
+            // Inline mutable is checked per-attr below when we parse tool args.
+            // This flag accumulates both sources.
+            let mut is_mutable = has_standalone_mutable;
+
+            // Extract doc comments from the method for tool/command descriptions.
+            let doc_description = extract_doc_comments(&method.attrs);
 
             for attr in &extracted_attrs {
                 // All attrs here have exactly 2 segments (enforced by the retain
@@ -171,12 +209,35 @@ fn capsule_impl(
                 // Existing dispatch attrs: tool / command / interceptor / cron
                 // ---------------------------------------------------------------
 
-                // Allow inferring the name from the function if no string argument is provided.
-                let name_val = if let Ok(name) = attr.parse_args::<LitStr>() {
-                    name.value()
-                } else {
-                    method_name.to_string()
-                };
+                // Parse tool/command/interceptor/cron arguments.
+                // Supports: ("name"), ("name", mutable), (mutable), or empty.
+                let name_val;
+                {
+                    let mut parsed_name = None;
+                    let mut parsed_mutable = false;
+                    if let Ok(args) = attr.parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                    ) {
+                        for arg in &args {
+                            match arg {
+                                syn::Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(s),
+                                    ..
+                                }) => {
+                                    parsed_name = Some(s.value());
+                                }
+                                syn::Expr::Path(p) if p.path.is_ident("mutable") => {
+                                    parsed_mutable = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    name_val = parsed_name.unwrap_or_else(|| method_name.to_string());
+                    if parsed_mutable {
+                        is_mutable = true;
+                    }
+                }
 
                 let call_expr = if arg_type.is_some() {
                     quote! {
@@ -234,7 +295,17 @@ fn capsule_impl(
                         #name_val => { #execute_block }
                     });
 
-                    // Automatically generate schemars extraction for this tool
+                    // Automatically generate schemars extraction for this tool.
+                    // Doc comments on the method become the tool description.
+                    let desc_insertion = if let Some(desc) = &doc_description {
+                        quote! {
+                            let metadata = schema.schema.metadata.get_or_insert_with(Default::default);
+                            metadata.description = Some(#desc.to_string());
+                        }
+                    } else {
+                        quote! {}
+                    };
+
                     if let Some(ty) = &arg_type {
                         schema_arms.push(quote! {
                             let mut schema = ::astrid_sdk::schemars::schema_for!(#ty);
@@ -242,6 +313,7 @@ fn capsule_impl(
                                 "mutable".to_string(),
                                 ::serde_json::json!(#is_mutable),
                             );
+                            #desc_insertion
                             map.insert(#name_val.to_string(), schema);
                         });
                     } else {
@@ -258,11 +330,12 @@ fn capsule_impl(
                                 ::serde_json::json!(#is_mutable),
                             );
 
-                            let schema = ::astrid_sdk::schemars::schema::RootSchema {
+                            let mut schema = ::astrid_sdk::schemars::schema::RootSchema {
                                 meta_schema: Some("http://json-schema.org/draft-07/schema#".to_string()),
                                 schema: obj,
                                 definitions: ::std::collections::BTreeMap::new(),
                             };
+                            #desc_insertion
                             map.insert(#name_val.to_string(), schema);
                         });
                     }
@@ -466,6 +539,12 @@ fn capsule_impl(
     // `plugin_fn` strips all outer attributes and generates a bare `#[no_mangle]`
     // wrapper, losing any `#[expect(missing_docs)]` we attach — so we bypass it.
 
+    let capsule_description_tokens = if let Some(desc) = &capsule_description {
+        quote! { Some(#desc) }
+    } else {
+        quote! { None }
+    };
+
     let expanded = quote! {
         #input
 
@@ -593,13 +672,31 @@ fn capsule_impl(
         }
 
         /// WASM ABI: Auto-generated schema export for CLI builders.
+        ///
+        /// Returns JSON with:
+        /// - `"tools"`: `BTreeMap<String, RootSchema>` — tool name → JSON schema
+        /// - `"description"`: `Option<String>` — capsule-level description from doc comments
         #[unsafe(no_mangle)]
         pub extern "C" fn astrid_export_schemas() -> i32 {
             fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
                 let _ = input;
                 let mut map: ::std::collections::BTreeMap<String, ::astrid_sdk::schemars::schema::RootSchema> = ::std::collections::BTreeMap::new();
                 #( #schema_arms )*
-                let json = ::serde_json::to_vec(&map)
+
+                // When a capsule description exists, use the new wrapped format:
+                //   { "tools": { ... }, "description": "..." }
+                // Otherwise, use the legacy flat format for backward compatibility:
+                //   { "tool_name": { schema }, ... }
+                let capsule_desc: Option<&str> = #capsule_description_tokens;
+                let json = if let Some(desc) = capsule_desc {
+                    let mut export = ::serde_json::Map::new();
+                    export.insert("tools".to_string(), ::serde_json::to_value(&map)
+                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tools: {}", e)))?);
+                    export.insert("description".to_string(), ::serde_json::Value::String(desc.to_string()));
+                    ::serde_json::to_vec(&export)
+                } else {
+                    ::serde_json::to_vec(&map)
+                }
                     .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize schemas: {}", e)))?;
                 Ok(json)
             }
@@ -679,7 +776,47 @@ mod tests {
         );
     }
 
-    /// `#[astrid::mutable]` listed before `#[astrid::tool]` must still work.
+    #[test]
+    fn inline_mutable_in_tool_attr() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("write_file", mutable)]
+                fn write_file(&self, args: WriteArgs) -> Result<WriteResult, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("json ! (true)"),
+            "Inline mutable should produce json!(true), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn inline_mutable_name_inferred() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool(mutable)]
+                fn write_file(&self, args: WriteArgs) -> Result<WriteResult, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("json ! (true)"),
+            "Inline mutable with inferred name should produce json!(true), got:\n{output}"
+        );
+        assert!(
+            output.contains("\"write_file\""),
+            "Name should be inferred from method, got:\n{output}"
+        );
+    }
+
+    /// `#[astrid::mutable]` listed before `#[astrid::tool]` must still work (legacy).
     #[test]
     fn mutable_before_tool_attr_order() {
         let attr = quote::quote! {};
@@ -1376,6 +1513,104 @@ mod tests {
         assert!(
             output.contains("event_loop"),
             "Should call user's event_loop method"
+        );
+    }
+
+    #[test]
+    fn doc_comment_becomes_tool_description() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                /// Read the contents of a file.
+                ///
+                /// Supports optional line range selection for partial reads.
+                #[astrid::tool("read_file")]
+                fn read_file(&self, args: ReadArgs) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        // The description should appear in the schema generation code
+        assert!(
+            output.contains("Read the contents of a file."),
+            "Schema should contain the first line of the doc comment, got:\n{output}"
+        );
+        assert!(
+            output.contains("Supports optional line range selection"),
+            "Schema should contain the full doc comment, got:\n{output}"
+        );
+        assert!(
+            output.contains("metadata . description"),
+            "Schema should set metadata.description, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn tool_without_doc_comment_has_no_description() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("bare_tool")]
+                fn bare_tool(&self, args: Args) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        // Should NOT contain description insertion
+        assert!(
+            !output.contains("metadata . description"),
+            "Tool without doc comments should not set description, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn capsule_doc_comment_becomes_export_description() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            /// Core filesystem tools for the Astrid OS.
+            ///
+            /// Provides sandboxed file operations through the VFS.
+            impl FsTools {
+                /// Read a file.
+                #[astrid::tool("read_file")]
+                fn read_file(&self, args: ReadArgs) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("Core filesystem tools"),
+            "Schema export should contain capsule doc comment, got:\n{output}"
+        );
+        assert!(
+            output.contains("sandboxed file operations"),
+            "Schema export should contain full capsule description, got:\n{output}"
+        );
+        assert!(
+            output.contains(r#""description""#),
+            "Schema export should insert description key, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn capsule_without_doc_has_no_description() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl BareCapsule {
+                #[astrid::tool("do_thing")]
+                fn do_thing(&self, args: Args) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        // The capsule_desc should be None, so no "description" key inserted
+        assert!(
+            output.contains("let capsule_desc : Option < & str > = None"),
+            "Capsule without doc should have None description, got:\n{output}"
         );
     }
 }
