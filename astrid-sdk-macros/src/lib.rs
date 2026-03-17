@@ -1613,6 +1613,148 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------
+    // Stateful dispatch: tool / interceptor / command
+    // ---------------------------------------------------------------
+
+    /// `&mut self` tool: generated dispatch must load state, call method, persist state.
+    #[test]
+    fn stateful_tool_dispatch_loads_and_saves_state() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("update")]
+                fn update(&mut self, args: UpdateArgs) -> Result<UpdateResult, SysError> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        let tool_pos = output.find("astrid_tool_call").expect("tool export missing");
+        let section = &output[tool_pos..];
+        assert!(
+            section.contains("get_json"),
+            "Stateful tool dispatch must load state via get_json"
+        );
+        assert!(
+            section.contains("set_json"),
+            "Stateful tool dispatch must persist state via set_json"
+        );
+    }
+
+    /// `&self` tool (stateless): uses `get_instance()`, no KV at all.
+    #[test]
+    fn stateless_tool_dispatch_uses_singleton() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("read")]
+                fn read(&self, args: ReadArgs) -> Result<ReadResult, SysError> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("get_instance"),
+            "Stateless tool dispatch must use singleton via get_instance"
+        );
+        let tool_pos = output.find("astrid_tool_call").expect("tool export missing");
+        let section = &output[tool_pos..];
+        assert!(
+            !section.contains("get_json"),
+            "Stateless tool dispatch must not call get_json"
+        );
+        assert!(
+            !section.contains("set_json"),
+            "Stateless tool dispatch must not call set_json"
+        );
+    }
+
+    /// `&mut self` interceptor: generated dispatch must load state, call method, persist state.
+    #[test]
+    fn stateful_interceptor_dispatch_loads_and_saves_state() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::interceptor("handle_event")]
+                fn handle_event(&mut self, payload: EventPayload) -> Result<(), SysError> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        let pos = output.find("astrid_hook_trigger").expect("hook export missing");
+        let section = &output[pos..];
+        assert!(
+            section.contains("get_json"),
+            "Stateful interceptor dispatch must load state via get_json"
+        );
+        assert!(
+            section.contains("set_json"),
+            "Stateful interceptor dispatch must persist state via set_json"
+        );
+    }
+
+    /// `&mut self` command: generated dispatch must load state, call method, persist state.
+    #[test]
+    fn stateful_command_dispatch_loads_and_saves_state() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::command("reset")]
+                fn reset(&mut self, payload: ResetPayload) -> Result<(), SysError> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        let pos = output.find("astrid_command_run").expect("command export missing");
+        let section = &output[pos..];
+        assert!(
+            section.contains("get_json"),
+            "Stateful command dispatch must load state via get_json"
+        );
+        assert!(
+            section.contains("set_json"),
+            "Stateful command dispatch must persist state via set_json"
+        );
+    }
+
+    /// Explicit `#[capsule(state)]` makes even `&self` tools use KV dispatch.
+    #[test]
+    fn explicit_state_attr_forces_stateful_dispatch() {
+        let attr = quote::quote! { state };
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("query")]
+                fn query(&self, args: QueryArgs) -> Result<QueryResult, SysError> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        let pos = output.find("astrid_tool_call").expect("tool export missing");
+        let section = &output[pos..];
+        assert!(
+            section.contains("get_json"),
+            "Explicit #[capsule(state)] must use KV load even for &self tools"
+        );
+        assert!(
+            section.contains("set_json"),
+            "Explicit #[capsule(state)] must use KV save even for &self tools"
+        );
+        assert!(
+            !output.contains("get_instance"),
+            "Explicit #[capsule(state)] must not generate get_instance singleton"
+        );
+    }
+
     #[test]
     fn capsule_without_doc_has_no_description() {
         let attr = quote::quote! {};
