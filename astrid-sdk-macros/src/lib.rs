@@ -63,7 +63,25 @@ fn capsule_impl(
     };
     let struct_name = &input.self_ty.clone();
 
-    let is_stateful = attr.to_string().trim() == "state";
+    // `#[capsule(state)]` explicitly opts into stateful mode.
+    // Stateful mode is also implied automatically when any method takes `&mut self`.
+    let attr_is_stateful = syn::parse2::<syn::Ident>(attr)
+        .map(|ident| ident == "state")
+        .unwrap_or(false);
+
+    // Detect stateful capsules by checking if any method takes `&mut self`.
+    // Stateful capsules have their struct loaded from KV before each handler
+    // and saved back after. No extra attribute needed — `&mut self` implies state.
+    let is_stateful = attr_is_stateful
+        || input.items.iter().any(|item| {
+            if let ImplItem::Fn(method) = item {
+                method.sig.inputs.iter().any(|arg| {
+                    matches!(arg, syn::FnArg::Receiver(r) if r.mutability.is_some())
+                })
+            } else {
+                false
+            }
+        });
 
     // Extract doc comments from the impl block as the capsule-level description.
     let capsule_description = extract_doc_comments(&input.attrs);
@@ -244,12 +262,12 @@ fn capsule_impl(
                         {
                             let args = ::serde_json::from_slice(&req.arguments)
                                 .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse arguments: {}", e)))?;
-                            instance.#method_name(args)?
+                            instance.#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
                         }
                     }
                 } else {
                     quote! {
-                        instance.#method_name()?
+                        instance.#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
                     }
                 };
 
@@ -258,12 +276,12 @@ fn capsule_impl(
                         {
                             let args = ::serde_json::from_slice(&req.arguments)
                                 .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse arguments: {}", e)))?;
-                            get_instance().#method_name(args)?
+                            get_instance().#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
                         }
                     }
                 } else {
                     quote! {
-                        get_instance().#method_name()?
+                        get_instance().#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
                     }
                 };
 
@@ -272,7 +290,7 @@ fn capsule_impl(
                         let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
                             Ok(state) => state,
                             Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
-                            Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e))),
+                            Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e)).into()),
                         };
                         let result = #call_expr;
                         ::astrid_sdk::prelude::kv::set_json("__state", &instance)
