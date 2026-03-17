@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 authors = ["Joshua J. Bouw <dev@joshuajbouw.com>", "Unicity Labs <info@unicity-labs.com>"]
 license = "MIT OR Apache-2.0"
@@ -15,9 +15,9 @@ repository = "https://github.com/unicity-astrid/sdk-rust"
 rust-version = "1.94"
 
 [workspace.dependencies]
-astrid-sdk = { path = "astrid-sdk", version = "0.2.2" }
-astrid-sdk-macros = { path = "astrid-sdk-macros", version = "0.2.2" }
-astrid-sys = { path = "astrid-sys", version = "0.2.2" }
+astrid-sdk = { path = "astrid-sdk", version = "0.3.0" }
+astrid-sdk-macros = { path = "astrid-sdk-macros", version = "0.3.0" }
+astrid-sys = { path = "astrid-sys", version = "0.3.0" }
 astrid-types = { version = "0.3.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
