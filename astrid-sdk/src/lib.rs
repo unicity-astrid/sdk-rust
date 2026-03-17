@@ -689,6 +689,66 @@ pub mod http {
         let result = unsafe { astrid_http_request(request_bytes.to_vec())? };
         Ok(result)
     }
+
+    /// Represents an active streaming HTTP response.
+    ///
+    /// Must be explicitly closed via [`stream_close`] when done.
+    /// Not `Clone` — each handle is a unique owner of the host-side resource.
+    #[derive(Debug)]
+    pub struct HttpStreamHandle(String);
+
+    /// Metadata returned when a streaming HTTP request is initiated.
+    pub struct StreamStartResponse {
+        /// The handle to use for subsequent [`stream_read`] / [`stream_close`] calls.
+        pub handle: HttpStreamHandle,
+        /// HTTP status code.
+        pub status: u16,
+        /// Response headers.
+        pub headers: std::collections::HashMap<String, String>,
+    }
+
+    /// Start a streaming HTTP request.
+    ///
+    /// Sends the request and waits for the status/headers to arrive.
+    /// Returns a [`StreamStartResponse`] with the handle, status, and headers.
+    /// Use [`stream_read`] to consume the body in chunks.
+    pub fn stream_start(request_bytes: &[u8]) -> Result<StreamStartResponse, SysError> {
+        let result = unsafe { astrid_http_stream_start(request_bytes.to_vec())? };
+
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            handle: String,
+            status: u16,
+            headers: std::collections::HashMap<String, String>,
+        }
+        let resp: Resp = serde_json::from_slice(&result)?;
+        Ok(StreamStartResponse {
+            handle: HttpStreamHandle(resp.handle),
+            status: resp.status,
+            headers: resp.headers,
+        })
+    }
+
+    /// Read the next chunk from a streaming HTTP response.
+    ///
+    /// Returns `Ok(Some(bytes))` with the next chunk of data, or
+    /// `Ok(None)` when the stream is exhausted (EOF).
+    pub fn stream_read(stream: &HttpStreamHandle) -> Result<Option<Vec<u8>>, SysError> {
+        let result = unsafe { astrid_http_stream_read(stream.0.as_bytes().to_vec())? };
+        if result.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
+    }
+
+    /// Close a streaming HTTP response, releasing host-side resources.
+    ///
+    /// Idempotent — closing an already-closed handle is a no-op.
+    pub fn stream_close(stream: &HttpStreamHandle) -> Result<(), SysError> {
+        unsafe { astrid_http_stream_close(stream.0.as_bytes().to_vec())? };
+        Ok(())
+    }
 }
 
 /// The Cron Airlock — Dynamic Background Scheduling
