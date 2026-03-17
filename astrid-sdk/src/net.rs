@@ -25,7 +25,13 @@ pub fn accept(listener: &ListenerHandle) -> Result<StreamHandle, SysError> {
 
 /// Read bytes from the stream.
 pub fn read(stream: &StreamHandle) -> Result<Vec<u8>, SysError> {
-    unsafe { Ok(astrid_net_read(stream.0.as_bytes().to_vec())?) }
+    let bytes = unsafe { astrid_net_read(stream.0.as_bytes().to_vec())? };
+    // Sentinel [0x01] signals a clean peer disconnect (broken pipe / EOF).
+    // The host writes this instead of trapping so the run loop can clean up.
+    if bytes == [0x01] {
+        return Err(SysError::ApiError("stream closed".to_string()));
+    }
+    Ok(bytes)
 }
 
 /// Write bytes to the stream.
