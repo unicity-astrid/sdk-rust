@@ -9,6 +9,8 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-17
+
 ### Added
 
 - Streaming HTTP API: `HttpStreamHandle` type and `http::stream_start`/`stream_read`/`stream_close` functions for consuming HTTP responses chunk-by-chunk (`astrid-sdk`)
@@ -30,6 +32,7 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 Initial tracked release. See the [repository history](https://github.com/unicity-astrid/sdk-rust/commits/v0.2.0)
 for changes included in this version.
 
-[Unreleased]: https://github.com/unicity-astrid/sdk-rust/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/unicity-astrid/sdk-rust/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/unicity-astrid/sdk-rust/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/unicity-astrid/sdk-rust/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/unicity-astrid/sdk-rust/releases/tag/v0.2.0
