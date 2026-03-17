@@ -693,24 +693,26 @@ pub mod http {
     /// Represents an active streaming HTTP response.
     ///
     /// Must be explicitly closed via [`stream_close`] when done.
-    #[derive(Debug, Clone)]
+    /// Not `Clone` — each handle is a unique owner of the host-side resource.
+    #[derive(Debug)]
     pub struct HttpStreamHandle(String);
+
+    /// Metadata returned when a streaming HTTP request is initiated.
+    pub struct StreamStartResponse {
+        /// The handle to use for subsequent [`stream_read`] / [`stream_close`] calls.
+        pub handle: HttpStreamHandle,
+        /// HTTP status code.
+        pub status: u16,
+        /// Response headers.
+        pub headers: std::collections::HashMap<String, String>,
+    }
 
     /// Start a streaming HTTP request.
     ///
     /// Sends the request and waits for the status/headers to arrive.
-    /// Returns the stream handle, HTTP status code, and response headers.
+    /// Returns a [`StreamStartResponse`] with the handle, status, and headers.
     /// Use [`stream_read`] to consume the body in chunks.
-    pub fn stream_start(
-        request_bytes: &[u8],
-    ) -> Result<
-        (
-            HttpStreamHandle,
-            u16,
-            std::collections::HashMap<String, String>,
-        ),
-        SysError,
-    > {
+    pub fn stream_start(request_bytes: &[u8]) -> Result<StreamStartResponse, SysError> {
         let result = unsafe { astrid_http_stream_start(request_bytes.to_vec())? };
 
         #[derive(serde::Deserialize)]
@@ -720,7 +722,11 @@ pub mod http {
             headers: std::collections::HashMap<String, String>,
         }
         let resp: Resp = serde_json::from_slice(&result)?;
-        Ok((HttpStreamHandle(resp.handle), resp.status, resp.headers))
+        Ok(StreamStartResponse {
+            handle: HttpStreamHandle(resp.handle),
+            status: resp.status,
+            headers: resp.headers,
+        })
     }
 
     /// Read the next chunk from a streaming HTTP response.
