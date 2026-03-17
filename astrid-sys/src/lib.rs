@@ -203,4 +203,14 @@ extern "ExtismHost" {
     /// Terminate a background process and clean up resources.
     /// Returns JSON: `{"killed":bool,"exit_code":int|null,"stdout":"...","stderr":"..."}`.
     pub fn astrid_kill_process_host(request: Vec<u8>) -> Vec<u8>;
+
+    // -----------------------------------------------------------------------
+    // Streaming HTTP
+    // -----------------------------------------------------------------------
+    /// Start a streaming HTTP request. Returns JSON: `{"handle":"...","status":200,"headers":{...}}`.
+    pub fn astrid_http_stream_start(request_bytes: Vec<u8>) -> Vec<u8>;
+    /// Read the next chunk from a streaming HTTP response. Returns raw bytes; empty = EOF.
+    pub fn astrid_http_stream_read(handle: Vec<u8>) -> Vec<u8>;
+    /// Close a streaming HTTP response handle, releasing host resources.
+    pub fn astrid_http_stream_close(handle: Vec<u8>);
 }

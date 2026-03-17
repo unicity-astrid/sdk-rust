@@ -689,6 +689,60 @@ pub mod http {
         let result = unsafe { astrid_http_request(request_bytes.to_vec())? };
         Ok(result)
     }
+
+    /// Represents an active streaming HTTP response.
+    ///
+    /// Must be explicitly closed via [`stream_close`] when done.
+    #[derive(Debug, Clone)]
+    pub struct HttpStreamHandle(String);
+
+    /// Start a streaming HTTP request.
+    ///
+    /// Sends the request and waits for the status/headers to arrive.
+    /// Returns the stream handle, HTTP status code, and response headers.
+    /// Use [`stream_read`] to consume the body in chunks.
+    pub fn stream_start(
+        request_bytes: &[u8],
+    ) -> Result<
+        (
+            HttpStreamHandle,
+            u16,
+            std::collections::HashMap<String, String>,
+        ),
+        SysError,
+    > {
+        let result = unsafe { astrid_http_stream_start(request_bytes.to_vec())? };
+
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            handle: String,
+            status: u16,
+            headers: std::collections::HashMap<String, String>,
+        }
+        let resp: Resp = serde_json::from_slice(&result)?;
+        Ok((HttpStreamHandle(resp.handle), resp.status, resp.headers))
+    }
+
+    /// Read the next chunk from a streaming HTTP response.
+    ///
+    /// Returns `Ok(Some(bytes))` with the next chunk of data, or
+    /// `Ok(None)` when the stream is exhausted (EOF).
+    pub fn stream_read(stream: &HttpStreamHandle) -> Result<Option<Vec<u8>>, SysError> {
+        let result = unsafe { astrid_http_stream_read(stream.0.as_bytes().to_vec())? };
+        if result.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
+    }
+
+    /// Close a streaming HTTP response, releasing host-side resources.
+    ///
+    /// Idempotent — closing an already-closed handle is a no-op.
+    pub fn stream_close(stream: &HttpStreamHandle) -> Result<(), SysError> {
+        unsafe { astrid_http_stream_close(stream.0.as_bytes().to_vec())? };
+        Ok(())
+    }
 }
 
 /// The Cron Airlock — Dynamic Background Scheduling
