@@ -113,6 +113,7 @@ pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
     loop {
         match try_recv(stream) {
             Ok(bytes) => return Ok(bytes),
+<<<<<<< HEAD
             Err(TryRecvError::Closed) => return Err(RecvError),
             Err(TryRecvError::Empty) => {
                 // try_recv blocks in the host for up to 50ms per call, so this
