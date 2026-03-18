@@ -9,6 +9,11 @@ pub struct ListenerHandle(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamHandle(pub String);
 
+/// Sentinel byte written by the host when a peer disconnects cleanly (EOF /
+/// broken pipe). Matches `NET_STREAM_CLOSED` in the host `net.rs`. A single
+/// byte can never be a valid length-prefixed message so it is unambiguous.
+const STREAM_CLOSED_SENTINEL: &[u8] = &[0x01];
+
 /// Bind a Unix Domain Socket to the given path and return a listener handle.
 pub fn bind_unix(path: impl AsRef<[u8]>) -> Result<ListenerHandle, SysError> {
     let bytes = unsafe { astrid_net_bind_unix(path.as_ref().to_vec())? };
@@ -28,7 +33,7 @@ pub fn read(stream: &StreamHandle) -> Result<Vec<u8>, SysError> {
     let bytes = unsafe { astrid_net_read(stream.0.as_bytes().to_vec())? };
     // Sentinel [0x01] signals a clean peer disconnect (broken pipe / EOF).
     // The host writes this instead of trapping so the run loop can clean up.
-    if bytes == [0x01] {
+    if bytes == STREAM_CLOSED_SENTINEL {
         return Err(SysError::ApiError("stream closed".to_string()));
     }
     Ok(bytes)

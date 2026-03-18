@@ -75,9 +75,11 @@ fn capsule_impl(
     let is_stateful = attr_is_stateful
         || input.items.iter().any(|item| {
             if let ImplItem::Fn(method) = item {
-                method.sig.inputs.iter().any(|arg| {
-                    matches!(arg, syn::FnArg::Receiver(r) if r.mutability.is_some())
-                })
+                method
+                    .sig
+                    .inputs
+                    .iter()
+                    .any(|arg| matches!(arg, syn::FnArg::Receiver(r) if r.mutability.is_some()))
             } else {
                 false
             }
@@ -1631,7 +1633,9 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        let tool_pos = output.find("astrid_tool_call").expect("tool export missing");
+        let tool_pos = output
+            .find("astrid_tool_call")
+            .expect("tool export missing");
         let section = &output[tool_pos..];
         assert!(
             section.contains("get_json"),
@@ -1661,7 +1665,9 @@ mod tests {
             output.contains("get_instance"),
             "Stateless tool dispatch must use singleton via get_instance"
         );
-        let tool_pos = output.find("astrid_tool_call").expect("tool export missing");
+        let tool_pos = output
+            .find("astrid_tool_call")
+            .expect("tool export missing");
         let section = &output[tool_pos..];
         assert!(
             !section.contains("get_json"),
@@ -1687,7 +1693,9 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        let pos = output.find("astrid_hook_trigger").expect("hook export missing");
+        let pos = output
+            .find("astrid_hook_trigger")
+            .expect("hook export missing");
         let section = &output[pos..];
         assert!(
             section.contains("get_json"),
@@ -1713,7 +1721,9 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        let pos = output.find("astrid_command_run").expect("command export missing");
+        let pos = output
+            .find("astrid_command_run")
+            .expect("command export missing");
         let section = &output[pos..];
         assert!(
             section.contains("get_json"),
@@ -1739,7 +1749,9 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        let pos = output.find("astrid_tool_call").expect("tool export missing");
+        let pos = output
+            .find("astrid_tool_call")
+            .expect("tool export missing");
         let section = &output[pos..];
         assert!(
             section.contains("get_json"),
