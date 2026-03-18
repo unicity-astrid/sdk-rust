@@ -845,7 +845,6 @@ pub mod env {
     }
 }
 
-/// Wall-clock access (like `std::time`).
 /// Wall-clock access — mirrors [`std::time`].
 ///
 /// The WASM guest has no direct access to system time. All calls go
