@@ -70,9 +70,9 @@ enum ReadStatus {
 impl ReadStatus {
     fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0x00 => Some(Self::Data),
-            0x01 => Some(Self::Closed),
-            0x02 => Some(Self::Pending),
+            b if b == Self::Data as u8 => Some(Self::Data),
+            b if b == Self::Closed as u8 => Some(Self::Closed),
+            b if b == Self::Pending as u8 => Some(Self::Pending),
             _ => None,
         }
     }
@@ -113,8 +113,13 @@ pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
     loop {
         match try_recv(stream) {
             Ok(bytes) => return Ok(bytes),
-            Err(TryRecvError::Empty) => continue,
             Err(TryRecvError::Closed) => return Err(RecvError),
+            Err(TryRecvError::Empty) => {
+                // try_recv blocks in the host for up to 50ms per call, so this
+                // loop is not a true busy-wait. The sleep adds a small yield
+                // between host calls for good measure.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 }
@@ -136,7 +141,7 @@ pub fn try_recv(stream: &StreamHandle) -> Result<Vec<u8>, TryRecvError> {
         .and_then(|&b| ReadStatus::from_byte(b))
         .ok_or(TryRecvError::Closed)?;
     match status {
-        ReadStatus::Data => Ok(bytes.get(1..).unwrap_or_default().to_vec()),
+        ReadStatus::Data => Ok(bytes[1..].to_vec()),
         ReadStatus::Closed => Err(TryRecvError::Closed),
         ReadStatus::Pending => Err(TryRecvError::Empty),
     }
