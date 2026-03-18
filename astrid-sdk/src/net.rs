@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 
 /// Represents a bound network listener.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListenerHandle(pub String);
+pub struct ListenerHandle(pub(crate) String);
 
 /// Represents an open network stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamHandle(pub String);
+pub struct StreamHandle(pub(crate) String);
 
 /// Error returned by [`recv`] when the stream is closed.
 ///

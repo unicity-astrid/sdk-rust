@@ -629,14 +629,108 @@ pub mod kv {
 }
 
 /// The HTTP Airlock — External Network Requests
+/// Outbound HTTP — typed request API over the host HTTP airlock.
 pub mod http {
     use super::*;
+    use serde::Serialize;
+    use std::collections::HashMap;
 
-    /// Issue a raw HTTP request. The `request_bytes` payload format depends on the Kernel's expectation
-    /// (e.g. JSON or MsgPack representation of the HTTP request).
-    pub fn request_bytes(request_bytes: &[u8]) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_http_request(request_bytes.to_vec())? };
-        Ok(result)
+    /// An HTTP request.
+    ///
+    /// Construct via [`Request::get`], [`Request::post`], etc. or
+    /// [`Request::new`] for arbitrary methods.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct Request {
+        url: String,
+        method: String,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        headers: HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    }
+
+    impl Request {
+        /// Create a request with an arbitrary method.
+        pub fn new(method: impl Into<String>, url: impl Into<String>) -> Self {
+            Self {
+                url: url.into(),
+                method: method.into(),
+                headers: HashMap::new(),
+                body: None,
+            }
+        }
+
+        /// Create a GET request.
+        pub fn get(url: impl Into<String>) -> Self {
+            Self::new("GET", url)
+        }
+
+        /// Create a POST request.
+        pub fn post(url: impl Into<String>) -> Self {
+            Self::new("POST", url)
+        }
+
+        /// Create a PUT request.
+        pub fn put(url: impl Into<String>) -> Self {
+            Self::new("PUT", url)
+        }
+
+        /// Create a DELETE request.
+        pub fn delete(url: impl Into<String>) -> Self {
+            Self::new("DELETE", url)
+        }
+
+        /// Add a header.
+        pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+            self.headers.insert(key.into(), value.into());
+            self
+        }
+
+        /// Set the request body.
+        pub fn body(mut self, body: impl Into<String>) -> Self {
+            self.body = Some(body.into());
+            self
+        }
+
+        /// Set a JSON body (serializes the value and sets Content-Type).
+        pub fn json<T: Serialize>(self, value: &T) -> Result<Self, SysError> {
+            let json = serde_json::to_string(value)?;
+            Ok(self.header("Content-Type", "application/json").body(json))
+        }
+
+        fn to_bytes(&self) -> Result<Vec<u8>, SysError> {
+            serde_json::to_vec(self).map_err(SysError::from)
+        }
+    }
+
+    /// An HTTP response from a non-streaming request.
+    #[derive(Debug)]
+    pub struct Response {
+        bytes: Vec<u8>,
+    }
+
+    impl Response {
+        /// The raw response body as bytes.
+        pub fn bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+
+        /// The response body as a UTF-8 string.
+        pub fn text(&self) -> Result<&str, SysError> {
+            core::str::from_utf8(&self.bytes).map_err(|e| SysError::ApiError(e.to_string()))
+        }
+
+        /// Deserialize the response body as JSON.
+        pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, SysError> {
+            serde_json::from_slice(&self.bytes).map_err(SysError::from)
+        }
+    }
+
+    /// Send an HTTP request and wait for the full response.
+    pub fn send(request: &Request) -> Result<Response, SysError> {
+        let req_bytes = request.to_bytes()?;
+        let result = unsafe { astrid_http_request(req_bytes)? };
+        Ok(Response { bytes: result })
     }
 
     /// Represents an active streaming HTTP response.
@@ -653,7 +747,7 @@ pub mod http {
         /// HTTP status code.
         pub status: u16,
         /// Response headers.
-        pub headers: std::collections::HashMap<String, String>,
+        pub headers: HashMap<String, String>,
     }
 
     /// Start a streaming HTTP request.
@@ -661,14 +755,15 @@ pub mod http {
     /// Sends the request and waits for the status/headers to arrive.
     /// Returns a [`StreamStartResponse`] with the handle, status, and headers.
     /// Use [`stream_read`] to consume the body in chunks.
-    pub fn stream_start(request_bytes: &[u8]) -> Result<StreamStartResponse, SysError> {
-        let result = unsafe { astrid_http_stream_start(request_bytes.to_vec())? };
+    pub fn stream_start(request: &Request) -> Result<StreamStartResponse, SysError> {
+        let req_bytes = request.to_bytes()?;
+        let result = unsafe { astrid_http_stream_start(req_bytes)? };
 
         #[derive(serde::Deserialize)]
         struct Resp {
             handle: String,
             status: u16,
-            headers: std::collections::HashMap<String, String>,
+            headers: HashMap<String, String>,
         }
         let resp: Resp = serde_json::from_slice(&result)?;
         Ok(StreamStartResponse {
@@ -929,7 +1024,14 @@ pub mod process {
     #[derive(Debug, Deserialize)]
     pub struct BackgroundProcessHandle {
         /// Opaque handle ID (not an OS PID).
-        pub id: u64,
+        id: u64,
+    }
+
+    impl BackgroundProcessHandle {
+        /// Returns the opaque handle ID for this process.
+        pub fn id(&self) -> u64 {
+            self.id
+        }
     }
 
     /// Buffered logs and status from a background process.
