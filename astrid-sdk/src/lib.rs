@@ -112,58 +112,7 @@ pub enum SysError {
     ApiError(String),
 }
 
-/// Virtual filesystem (mirrors `std::fs` naming).
-pub mod fs {
-    use super::*;
-
-    /// Check if a path exists. Like `std::fs::exists` (nightly).
-    pub fn exists(path: impl AsRef<[u8]>) -> Result<bool, SysError> {
-        let result = unsafe { astrid_fs_exists(path.as_ref().to_vec())? };
-        Ok(!result.is_empty() && result[0] != 0)
-    }
-
-    /// Read the entire contents of a file as bytes. Like `std::fs::read`.
-    pub fn read(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_read_file(path.as_ref().to_vec())? };
-        Ok(result)
-    }
-
-    /// Read the entire contents of a file as a string. Like `std::fs::read_to_string`.
-    pub fn read_to_string(path: impl AsRef<[u8]>) -> Result<String, SysError> {
-        let bytes = read(path)?;
-        String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))
-    }
-
-    /// Write bytes to a file. Like `std::fs::write`.
-    pub fn write(path: impl AsRef<[u8]>, contents: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_write_file(path.as_ref().to_vec(), contents.as_ref().to_vec())? };
-        Ok(())
-    }
-
-    /// Create a directory. Like `std::fs::create_dir`.
-    pub fn create_dir(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_fs_mkdir(path.as_ref().to_vec())? };
-        Ok(())
-    }
-
-    /// Read directory entries. Like `std::fs::read_dir`.
-    pub fn read_dir(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_fs_readdir(path.as_ref().to_vec())? };
-        Ok(result)
-    }
-
-    /// Get file metadata. Like `std::fs::metadata`.
-    pub fn metadata(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_fs_stat(path.as_ref().to_vec())? };
-        Ok(result)
-    }
-
-    /// Remove a file. Like `std::fs::remove_file`.
-    pub fn remove_file(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_fs_unlink(path.as_ref().to_vec())? };
-        Ok(())
-    }
-}
+pub mod fs;
 
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
 pub mod ipc {
@@ -802,49 +751,59 @@ pub mod env {
 }
 
 /// Wall-clock access (like `std::time`).
+/// Wall-clock access — mirrors [`std::time`].
+///
+/// The WASM guest has no direct access to system time. All calls go
+/// through the host. Returns [`std::time::SystemTime`] for compatibility
+/// with standard Rust code.
 pub mod time {
     use super::*;
 
-    /// Returns the current wall-clock time as milliseconds since the UNIX epoch.
+    /// Returns the current wall-clock time.
     ///
-    /// This is a host call - the WASM guest has no direct access to system time.
-    /// Returns 0 if the host clock is unavailable.
-    pub fn now_ms() -> Result<u64, SysError> {
+    /// This is a host call — the WASM guest has no direct access to the
+    /// system clock. Unlike [`std::time::SystemTime::now`], this returns
+    /// `Result` because the host call can fail.
+    pub fn now() -> Result<std::time::SystemTime, SysError> {
         let bytes = unsafe { astrid_clock_ms()? };
         let s = String::from_utf8_lossy(&bytes);
-        s.trim()
+        let ms = s
+            .trim()
             .parse::<u64>()
-            .map_err(|e| SysError::ApiError(format!("clock_ms parse error: {e}")))
+            .map_err(|e| SysError::ApiError(format!("clock parse error: {e}")))?;
+        Ok(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
     }
 }
 
-/// Structured logging.
+/// Structured logging — mirrors the [`log`](https://docs.rs/log) crate conventions.
 pub mod log {
     use super::*;
+    use core::fmt::Display;
 
     /// Log a message at the given level.
-    pub fn log(level: impl AsRef<[u8]>, message: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_log(level.as_ref().to_vec(), message.as_ref().to_vec())? };
+    pub fn log(level: &str, message: impl Display) -> Result<(), SysError> {
+        let msg = format!("{message}");
+        unsafe { astrid_log(level.as_bytes().to_vec(), msg.into_bytes())? };
         Ok(())
     }
 
     /// Log at DEBUG level.
-    pub fn debug(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn debug(message: impl Display) -> Result<(), SysError> {
         log("debug", message)
     }
 
     /// Log at INFO level.
-    pub fn info(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn info(message: impl Display) -> Result<(), SysError> {
         log("info", message)
     }
 
     /// Log at WARN level.
-    pub fn warn(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn warn(message: impl Display) -> Result<(), SysError> {
         log("warn", message)
     }
 
     /// Log at ERROR level.
-    pub fn error(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn error(message: impl Display) -> Result<(), SysError> {
         log("error", message)
     }
 }
