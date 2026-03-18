@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 
 /// Represents a bound network listener.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListenerHandle(pub String);
+pub struct ListenerHandle(pub(crate) String);
 
 /// Represents an open network stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamHandle(pub String);
+pub struct StreamHandle(pub(crate) String);
 
 /// Error returned by [`recv`] when the stream is closed.
 ///
@@ -21,6 +21,8 @@ impl core::fmt::Display for RecvError {
         write!(f, "stream closed")
     }
 }
+
+impl std::error::Error for RecvError {}
 
 /// Error returned by [`try_recv`] when no message is ready or the stream
 /// is closed.
@@ -43,6 +45,8 @@ impl core::fmt::Display for TryRecvError {
     }
 }
 
+impl std::error::Error for TryRecvError {}
+
 /// Error returned by [`send`] when the stream is closed and the message
 /// could not be delivered.
 ///
@@ -55,6 +59,8 @@ impl core::fmt::Display for SendError {
         write!(f, "stream closed")
     }
 }
+
+impl std::error::Error for SendError {}
 
 /// Wire-format status byte prepended to every `astrid_net_read` response.
 ///

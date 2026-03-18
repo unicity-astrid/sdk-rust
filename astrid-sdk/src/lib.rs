@@ -112,58 +112,7 @@ pub enum SysError {
     ApiError(String),
 }
 
-/// Virtual filesystem (mirrors `std::fs` naming).
-pub mod fs {
-    use super::*;
-
-    /// Check if a path exists. Like `std::fs::exists` (nightly).
-    pub fn exists(path: impl AsRef<[u8]>) -> Result<bool, SysError> {
-        let result = unsafe { astrid_fs_exists(path.as_ref().to_vec())? };
-        Ok(!result.is_empty() && result[0] != 0)
-    }
-
-    /// Read the entire contents of a file as bytes. Like `std::fs::read`.
-    pub fn read(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_read_file(path.as_ref().to_vec())? };
-        Ok(result)
-    }
-
-    /// Read the entire contents of a file as a string. Like `std::fs::read_to_string`.
-    pub fn read_to_string(path: impl AsRef<[u8]>) -> Result<String, SysError> {
-        let bytes = read(path)?;
-        String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))
-    }
-
-    /// Write bytes to a file. Like `std::fs::write`.
-    pub fn write(path: impl AsRef<[u8]>, contents: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_write_file(path.as_ref().to_vec(), contents.as_ref().to_vec())? };
-        Ok(())
-    }
-
-    /// Create a directory. Like `std::fs::create_dir`.
-    pub fn create_dir(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_fs_mkdir(path.as_ref().to_vec())? };
-        Ok(())
-    }
-
-    /// Read directory entries. Like `std::fs::read_dir`.
-    pub fn read_dir(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_fs_readdir(path.as_ref().to_vec())? };
-        Ok(result)
-    }
-
-    /// Get file metadata. Like `std::fs::metadata`.
-    pub fn metadata(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_fs_stat(path.as_ref().to_vec())? };
-        Ok(result)
-    }
-
-    /// Remove a file. Like `std::fs::remove_file`.
-    pub fn remove_file(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_fs_unlink(path.as_ref().to_vec())? };
-        Ok(())
-    }
-}
+pub mod fs;
 
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
 pub mod ipc {
@@ -680,14 +629,108 @@ pub mod kv {
 }
 
 /// The HTTP Airlock — External Network Requests
+/// Outbound HTTP — typed request API over the host HTTP airlock.
 pub mod http {
     use super::*;
+    use serde::Serialize;
+    use std::collections::HashMap;
 
-    /// Issue a raw HTTP request. The `request_bytes` payload format depends on the Kernel's expectation
-    /// (e.g. JSON or MsgPack representation of the HTTP request).
-    pub fn request_bytes(request_bytes: &[u8]) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_http_request(request_bytes.to_vec())? };
-        Ok(result)
+    /// An HTTP request.
+    ///
+    /// Construct via [`Request::get`], [`Request::post`], etc. or
+    /// [`Request::new`] for arbitrary methods.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct Request {
+        url: String,
+        method: String,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        headers: HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    }
+
+    impl Request {
+        /// Create a request with an arbitrary method.
+        pub fn new(method: impl Into<String>, url: impl Into<String>) -> Self {
+            Self {
+                url: url.into(),
+                method: method.into(),
+                headers: HashMap::new(),
+                body: None,
+            }
+        }
+
+        /// Create a GET request.
+        pub fn get(url: impl Into<String>) -> Self {
+            Self::new("GET", url)
+        }
+
+        /// Create a POST request.
+        pub fn post(url: impl Into<String>) -> Self {
+            Self::new("POST", url)
+        }
+
+        /// Create a PUT request.
+        pub fn put(url: impl Into<String>) -> Self {
+            Self::new("PUT", url)
+        }
+
+        /// Create a DELETE request.
+        pub fn delete(url: impl Into<String>) -> Self {
+            Self::new("DELETE", url)
+        }
+
+        /// Add a header.
+        pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+            self.headers.insert(key.into(), value.into());
+            self
+        }
+
+        /// Set the request body.
+        pub fn body(mut self, body: impl Into<String>) -> Self {
+            self.body = Some(body.into());
+            self
+        }
+
+        /// Set a JSON body (serializes the value and sets Content-Type).
+        pub fn json<T: Serialize>(self, value: &T) -> Result<Self, SysError> {
+            let json = serde_json::to_string(value)?;
+            Ok(self.header("Content-Type", "application/json").body(json))
+        }
+
+        fn to_bytes(&self) -> Result<Vec<u8>, SysError> {
+            serde_json::to_vec(self).map_err(SysError::from)
+        }
+    }
+
+    /// An HTTP response from a non-streaming request.
+    #[derive(Debug)]
+    pub struct Response {
+        bytes: Vec<u8>,
+    }
+
+    impl Response {
+        /// The raw response body as bytes.
+        pub fn bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+
+        /// The response body as a UTF-8 string.
+        pub fn text(&self) -> Result<&str, SysError> {
+            core::str::from_utf8(&self.bytes).map_err(|e| SysError::ApiError(e.to_string()))
+        }
+
+        /// Deserialize the response body as JSON.
+        pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, SysError> {
+            serde_json::from_slice(&self.bytes).map_err(SysError::from)
+        }
+    }
+
+    /// Send an HTTP request and wait for the full response.
+    pub fn send(request: &Request) -> Result<Response, SysError> {
+        let req_bytes = request.to_bytes()?;
+        let result = unsafe { astrid_http_request(req_bytes)? };
+        Ok(Response { bytes: result })
     }
 
     /// Represents an active streaming HTTP response.
@@ -704,7 +747,7 @@ pub mod http {
         /// HTTP status code.
         pub status: u16,
         /// Response headers.
-        pub headers: std::collections::HashMap<String, String>,
+        pub headers: HashMap<String, String>,
     }
 
     /// Start a streaming HTTP request.
@@ -712,14 +755,15 @@ pub mod http {
     /// Sends the request and waits for the status/headers to arrive.
     /// Returns a [`StreamStartResponse`] with the handle, status, and headers.
     /// Use [`stream_read`] to consume the body in chunks.
-    pub fn stream_start(request_bytes: &[u8]) -> Result<StreamStartResponse, SysError> {
-        let result = unsafe { astrid_http_stream_start(request_bytes.to_vec())? };
+    pub fn stream_start(request: &Request) -> Result<StreamStartResponse, SysError> {
+        let req_bytes = request.to_bytes()?;
+        let result = unsafe { astrid_http_stream_start(req_bytes)? };
 
         #[derive(serde::Deserialize)]
         struct Resp {
             handle: String,
             status: u16,
-            headers: std::collections::HashMap<String, String>,
+            headers: HashMap<String, String>,
         }
         let resp: Resp = serde_json::from_slice(&result)?;
         Ok(StreamStartResponse {
@@ -801,50 +845,59 @@ pub mod env {
     }
 }
 
-/// Wall-clock access (like `std::time`).
+/// Wall-clock access — mirrors [`std::time`].
+///
+/// The WASM guest has no direct access to system time. All calls go
+/// through the host. Returns [`std::time::SystemTime`] for compatibility
+/// with standard Rust code.
 pub mod time {
     use super::*;
 
-    /// Returns the current wall-clock time as milliseconds since the UNIX epoch.
+    /// Returns the current wall-clock time.
     ///
-    /// This is a host call - the WASM guest has no direct access to system time.
-    /// Returns 0 if the host clock is unavailable.
-    pub fn now_ms() -> Result<u64, SysError> {
+    /// This is a host call — the WASM guest has no direct access to the
+    /// system clock. Unlike [`std::time::SystemTime::now`], this returns
+    /// `Result` because the host call can fail.
+    pub fn now() -> Result<std::time::SystemTime, SysError> {
         let bytes = unsafe { astrid_clock_ms()? };
         let s = String::from_utf8_lossy(&bytes);
-        s.trim()
+        let ms = s
+            .trim()
             .parse::<u64>()
-            .map_err(|e| SysError::ApiError(format!("clock_ms parse error: {e}")))
+            .map_err(|e| SysError::ApiError(format!("clock parse error: {e}")))?;
+        Ok(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
     }
 }
 
-/// Structured logging.
+/// Structured logging — mirrors the [`log`](https://docs.rs/log) crate conventions.
 pub mod log {
     use super::*;
+    use core::fmt::Display;
 
     /// Log a message at the given level.
-    pub fn log(level: impl AsRef<[u8]>, message: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_log(level.as_ref().to_vec(), message.as_ref().to_vec())? };
+    pub fn log(level: &str, message: impl Display) -> Result<(), SysError> {
+        let msg = format!("{message}");
+        unsafe { astrid_log(level.as_bytes().to_vec(), msg.into_bytes())? };
         Ok(())
     }
 
     /// Log at DEBUG level.
-    pub fn debug(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn debug(message: impl Display) -> Result<(), SysError> {
         log("debug", message)
     }
 
     /// Log at INFO level.
-    pub fn info(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn info(message: impl Display) -> Result<(), SysError> {
         log("info", message)
     }
 
     /// Log at WARN level.
-    pub fn warn(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn warn(message: impl Display) -> Result<(), SysError> {
         log("warn", message)
     }
 
     /// Log at ERROR level.
-    pub fn error(message: impl AsRef<[u8]>) -> Result<(), SysError> {
+    pub fn error(message: impl Display) -> Result<(), SysError> {
         log("error", message)
     }
 }
@@ -970,7 +1023,14 @@ pub mod process {
     #[derive(Debug, Deserialize)]
     pub struct BackgroundProcessHandle {
         /// Opaque handle ID (not an OS PID).
-        pub id: u64,
+        id: u64,
+    }
+
+    impl BackgroundProcessHandle {
+        /// Returns the opaque handle ID for this process.
+        pub fn id(&self) -> u64 {
+            self.id
+        }
     }
 
     /// Buffered logs and status from a background process.
