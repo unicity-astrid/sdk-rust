@@ -56,13 +56,27 @@ impl core::fmt::Display for SendError {
     }
 }
 
-/// Sentinel byte written by the host when a peer disconnects cleanly (EOF /
-/// broken pipe). Matches `NET_STREAM_CLOSED` in the host `net.rs`. A single
-/// byte can never be a valid length-prefixed message so it is unambiguous.
+/// Wire-format status byte prepended to every `astrid_net_read` response.
 ///
-/// Internal — not part of the public API. Callers receive [`TryRecvError::Closed`]
-/// or [`RecvError`] instead.
-const STREAM_CLOSED_SENTINEL: &[u8] = &[0x01];
+/// Matches `NetReadStatus` in the host `net.rs`. Internal — callers receive
+/// [`TryRecvError`] or `Ok(bytes)` instead.
+#[repr(u8)]
+enum ReadStatus {
+    Data = 0x00,
+    Closed = 0x01,
+    Pending = 0x02,
+}
+
+impl ReadStatus {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(Self::Data),
+            0x01 => Some(Self::Closed),
+            0x02 => Some(Self::Pending),
+            _ => None,
+        }
+    }
+}
 
 /// Bind a Unix Domain Socket to the given path and return a listener handle.
 pub fn bind_unix(path: impl AsRef<[u8]>) -> Result<ListenerHandle, SysError> {
@@ -116,13 +130,16 @@ pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
 pub fn try_recv(stream: &StreamHandle) -> Result<Vec<u8>, TryRecvError> {
     let bytes =
         unsafe { astrid_net_read(stream.0.as_bytes().to_vec()).map_err(|_| TryRecvError::Closed)? };
-    if bytes == STREAM_CLOSED_SENTINEL {
-        return Err(TryRecvError::Closed);
+    // First byte is always the NetReadStatus discriminant (see host net.rs).
+    let status = bytes
+        .first()
+        .and_then(|&b| ReadStatus::from_byte(b))
+        .ok_or(TryRecvError::Closed)?;
+    match status {
+        ReadStatus::Data => Ok(bytes.get(1..).unwrap_or_default().to_vec()),
+        ReadStatus::Closed => Err(TryRecvError::Closed),
+        ReadStatus::Pending => Err(TryRecvError::Empty),
     }
-    if bytes.is_empty() {
-        return Err(TryRecvError::Empty);
-    }
-    Ok(bytes)
 }
 
 /// Send a message to the stream.
