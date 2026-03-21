@@ -11,8 +11,6 @@ interface registry {
         id: string,
         description: string,
         capsule: string,
-        request-topic: string,
-        stream-topic: string,
         capabilities: list<string>,
     }
 
@@ -37,7 +35,5 @@ interface registry {
         previous: option<string>,
         current: string,
         capsule: string,
-        request-topic: string,
-        stream-topic: string,
     }
 }
