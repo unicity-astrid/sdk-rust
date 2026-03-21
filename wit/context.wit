@@ -1,11 +1,11 @@
-package astrid:context-engine@1.0.0;
+package astrid:context@1.0.0;
 
-/// Context engine interface — conversation compaction and token management.
+/// Context interface — conversation compaction and token management.
 ///
 /// A capsule exporting this interface handles `context_engine.v1.*`
 /// requests and publishes compaction responses and hooks for plugin
 /// capsules to influence compaction behaviour.
-interface context-engine {
+interface context {
     /// Request to compact messages within a token budget.
     record compact-request {
         session-id: string,

@@ -1,11 +1,11 @@
-package astrid:hook-lifecycle@1.0.0;
+package astrid:hook@1.0.0;
 
-/// Hook lifecycle interface — maps kernel lifecycle events to semantic hooks.
+/// Hook interface — maps kernel lifecycle events to semantic hooks.
 ///
 /// A capsule exporting this interface intercepts `astrid.v1.lifecycle.*`
 /// events and publishes `hook.v1.result.*` with merge strategy results.
 /// Plugin capsules subscribe to specific hooks to extend behaviour.
-interface hook-lifecycle {
+interface hook {
     /// Lifecycle events emitted by the kernel.
     enum lifecycle-event {
         session-created,

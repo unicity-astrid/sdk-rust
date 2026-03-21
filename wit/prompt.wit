@@ -1,11 +1,11 @@
-package astrid:prompt-assembly@1.0.0;
+package astrid:prompt@1.0.0;
 
-/// Prompt assembly interface — assembles LLM prompts with plugin hooks.
+/// Prompt interface — assembles LLM prompts with plugin hooks.
 ///
 /// A capsule exporting this interface handles `prompt_builder.v1.assemble`
 /// and publishes assembled prompts, with before/after hooks for context
 /// injection by plugin capsules.
-interface prompt-assembly {
+interface prompt {
     /// Request to assemble a prompt for LLM generation.
     record assemble-request {
         messages: string,
