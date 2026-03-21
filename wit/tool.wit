@@ -6,19 +6,7 @@ package astrid:tool@1.0.0;
 /// routes to the appropriate tool capsule via `tool.v1.execute.<name>`,
 /// and collects results on `tool.v1.execute.*.result`.
 interface tool {
-    /// Request to execute a tool.
-    record execute-request {
-        call-id: string,
-        tool-name: string,
-        arguments: string,
-    }
-
-    /// Result of tool execution.
-    record execute-result {
-        call-id: string,
-        content: string,
-        is-error: bool,
-    }
+    use astrid:types/types.{tool-call, tool-call-result};
 
     /// Request to cancel in-flight tool executions.
     record cancel-request {

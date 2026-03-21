@@ -1,10 +1,10 @@
 package astrid:llm@1.0.0;
 
-/// LLM provider interface — streaming text generation with tool use support.
+/// LLM interface — streaming text generation with tool use support.
 ///
 /// A capsule exporting this interface handles `llm.v1.request.generate.*`
 /// events and publishes `llm.v1.stream.*` streaming responses.
-interface provider {
+interface llm {
     use astrid:types/types.{message, tool-definition, usage};
 
     /// Request to generate a response.

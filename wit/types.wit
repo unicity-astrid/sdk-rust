@@ -38,8 +38,8 @@ interface types {
 
     /// A tool call requested by the model.
     record tool-call {
-        id: string,
-        name: string,
+        call-id: string,
+        tool-name: string,
         arguments: string,
     }
 
@@ -59,7 +59,7 @@ interface types {
 
     /// Token usage statistics.
     record usage {
-        input-tokens: u32,
-        output-tokens: u32,
+        input-tokens: u64,
+        output-tokens: u64,
     }
 }
