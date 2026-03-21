@@ -6,17 +6,19 @@ package astrid:context@1.0.0;
 /// requests and publishes compaction responses and hooks for plugin
 /// capsules to influence compaction behaviour.
 interface context {
+    use astrid:types/types.{message};
+
     /// Request to compact messages within a token budget.
     record compact-request {
         session-id: string,
-        messages: string,
+        messages: list<message>,
         max-tokens: u64,
         target-tokens: u64,
     }
 
     /// Result of compaction.
     record compact-response {
-        messages: string,
+        messages: list<message>,
         compacted: bool,
         messages-removed: u32,
         strategy: string,
@@ -24,7 +26,7 @@ interface context {
 
     /// Request to estimate token count for messages.
     record estimate-request {
-        messages: string,
+        messages: list<message>,
     }
 
     /// Token count estimate.
@@ -35,7 +37,7 @@ interface context {
     /// Hook payload sent before compaction (plugins can influence).
     record before-compaction-hook {
         session-id: string,
-        messages: string,
+        messages: list<message>,
         message-count: u32,
         estimated-tokens: u64,
         max-tokens: u64,

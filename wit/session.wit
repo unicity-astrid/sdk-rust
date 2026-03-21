@@ -6,7 +6,7 @@ package astrid:session@1.0.0;
 /// events and publishes `session.v1.response.*` replies scoped by
 /// correlation ID.
 interface session {
-    use astrid:llm/provider.{message};
+    use astrid:types/types.{message};
 
     /// Request to fetch conversation history.
     record get-messages-request {

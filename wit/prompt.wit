@@ -6,9 +6,11 @@ package astrid:prompt@1.0.0;
 /// and publishes assembled prompts, with before/after hooks for context
 /// injection by plugin capsules.
 interface prompt {
+    use astrid:types/types.{message};
+
     /// Request to assemble a prompt for LLM generation.
     record assemble-request {
-        messages: string,
+        messages: list<message>,
         system-prompt: string,
         request-id: string,
         model: string,
@@ -26,7 +28,7 @@ interface prompt {
 
     /// Hook payload sent before prompt build (plugins inject context).
     record before-build-hook {
-        messages: string,
+        messages: list<message>,
         system-prompt: string,
         request-id: string,
         model: string,
