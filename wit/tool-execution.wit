@@ -1,0 +1,27 @@
+package astrid:tool-execution@1.0.0;
+
+/// Tool execution interface — dispatches tool calls to capsule handlers.
+///
+/// A capsule exporting this interface handles `tool.v1.request.execute`,
+/// routes to the appropriate tool capsule via `tool.v1.execute.<name>`,
+/// and collects results on `tool.v1.execute.*.result`.
+interface tool-execution {
+    /// Request to execute a tool.
+    record execute-request {
+        call-id: string,
+        tool-name: string,
+        arguments: string,
+    }
+
+    /// Result of tool execution.
+    record execute-result {
+        call-id: string,
+        content: string,
+        is-error: bool,
+    }
+
+    /// Request to cancel in-flight tool executions.
+    record cancel-request {
+        call-ids: list<string>,
+    }
+}

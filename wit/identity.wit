@@ -1,0 +1,20 @@
+package astrid:identity@1.0.0;
+
+/// Identity interface — agent identity and system prompt construction.
+///
+/// A capsule exporting this interface handles `identity.v1.request.build`
+/// and publishes `identity.v1.response.ready` with the assembled system
+/// prompt for the current workspace and session.
+interface identity {
+    /// Request to build the agent's system prompt.
+    record build-request {
+        workspace-root: string,
+        session-id: option<string>,
+    }
+
+    /// Response with the assembled system prompt.
+    record build-response {
+        prompt: string,
+        session-id: option<string>,
+    }
+}

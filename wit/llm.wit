@@ -1,0 +1,111 @@
+package astrid:llm@1.0.0;
+
+/// LLM provider interface — streaming text generation with tool use support.
+///
+/// A capsule exporting this interface handles `llm.v1.request.generate.*`
+/// events and publishes `llm.v1.stream.*` streaming responses.
+interface provider {
+    /// A conversation message.
+    record message {
+        role: message-role,
+        content: message-content,
+    }
+
+    enum message-role {
+        system,
+        user,
+        assistant,
+        tool,
+    }
+
+    /// Message content — text, tool calls, tool results, or mixed.
+    variant message-content {
+        text(string),
+        tool-calls(list<tool-call>),
+        tool-result(tool-call-result),
+        multi-part(list<content-part>),
+    }
+
+    variant content-part {
+        text(string),
+        image(image-data),
+    }
+
+    record image-data {
+        data: string,
+        media-type: string,
+    }
+
+    /// A tool call requested by the model.
+    record tool-call {
+        id: string,
+        name: string,
+        arguments: string,
+    }
+
+    /// Result of executing a tool call.
+    record tool-call-result {
+        call-id: string,
+        content: string,
+        is-error: bool,
+    }
+
+    /// A tool definition provided to the model.
+    record tool-definition {
+        name: string,
+        description: option<string>,
+        input-schema: string,
+    }
+
+    /// Request to generate a response.
+    record generate-request {
+        request-id: string,
+        model: string,
+        messages: list<message>,
+        tools: list<tool-definition>,
+        system-prompt: string,
+    }
+
+    /// A streaming event from the provider.
+    variant stream-event {
+        text-delta(string),
+        tool-call-start(tool-call-start-event),
+        tool-call-delta(tool-call-delta-event),
+        tool-call-end(string),
+        reasoning-delta(string),
+        usage(usage),
+        done,
+        error(string),
+    }
+
+    record tool-call-start-event {
+        id: string,
+        name: string,
+    }
+
+    record tool-call-delta-event {
+        id: string,
+        args-delta: string,
+    }
+
+    /// Token usage statistics.
+    record usage {
+        input-tokens: u32,
+        output-tokens: u32,
+    }
+
+    /// Final (non-streaming) response.
+    record generate-response {
+        message: message,
+        has-tool-calls: bool,
+        stop-reason: stop-reason,
+        usage: usage,
+    }
+
+    enum stop-reason {
+        end-turn,
+        max-tokens,
+        tool-use,
+        stop-sequence,
+    }
+}

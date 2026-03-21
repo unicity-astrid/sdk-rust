@@ -1,0 +1,51 @@
+package astrid:prompt-assembly@1.0.0;
+
+/// Prompt assembly interface — assembles LLM prompts with plugin hooks.
+///
+/// A capsule exporting this interface handles `prompt_builder.v1.assemble`
+/// and publishes assembled prompts, with before/after hooks for context
+/// injection by plugin capsules.
+interface prompt-assembly {
+    /// Request to assemble a prompt for LLM generation.
+    record assemble-request {
+        messages: string,
+        system-prompt: string,
+        request-id: string,
+        model: string,
+        provider: string,
+        session-id: option<string>,
+    }
+
+    /// Assembled prompt ready for LLM.
+    record assemble-response {
+        system-prompt: string,
+        user-context-prefix: string,
+        request-id: string,
+        session-id: option<string>,
+    }
+
+    /// Hook payload sent before prompt build (plugins inject context).
+    record before-build-hook {
+        messages: string,
+        system-prompt: string,
+        request-id: string,
+        model: string,
+        provider: string,
+        response-topic: string,
+    }
+
+    /// Plugin response to before-build hook.
+    record before-build-hook-response {
+        prepend-system-context: option<string>,
+        append-system-context: option<string>,
+        system-prompt: option<string>,
+        prepend-context: option<string>,
+    }
+
+    /// Notification after prompt is built.
+    record after-build-event {
+        system-prompt: string,
+        user-context-prefix: string,
+        request-id: string,
+    }
+}
