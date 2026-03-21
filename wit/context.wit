@@ -1,0 +1,63 @@
+package astrid:context@1.0.0;
+
+/// Context interface — conversation compaction and token management.
+///
+/// A capsule exporting this interface handles `context_engine.v1.*`
+/// requests and publishes compaction responses and hooks for plugin
+/// capsules to influence compaction behaviour.
+interface context {
+    use astrid:types/types.{message};
+
+    /// Request to compact messages within a token budget.
+    record compact-request {
+        session-id: string,
+        messages: list<message>,
+        max-tokens: u64,
+        target-tokens: u64,
+    }
+
+    /// Result of compaction.
+    record compact-response {
+        messages: list<message>,
+        compacted: bool,
+        messages-removed: u32,
+        strategy: string,
+    }
+
+    /// Request to estimate token count for messages.
+    record estimate-request {
+        messages: list<message>,
+    }
+
+    /// Token count estimate.
+    record estimate-response {
+        estimated-tokens: u64,
+    }
+
+    /// Hook payload sent before compaction (plugins can influence).
+    record before-compaction-hook {
+        session-id: string,
+        messages: list<message>,
+        message-count: u32,
+        estimated-tokens: u64,
+        max-tokens: u64,
+        response-topic: string,
+    }
+
+    /// Plugin response to before-compaction hook.
+    record before-compaction-hook-response {
+        skip: option<bool>,
+        pinned-message-ids: list<string>,
+        custom-strategy: option<string>,
+    }
+
+    /// Notification after compaction completes.
+    record after-compaction-event {
+        session-id: string,
+        messages-before: u32,
+        messages-after: u32,
+        tokens-before: u64,
+        tokens-after: u64,
+        strategy-used: string,
+    }
+}

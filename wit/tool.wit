@@ -1,0 +1,15 @@
+package astrid:tool@1.0.0;
+
+/// Tool interface — dispatches tool calls to capsule handlers.
+///
+/// A capsule exporting this interface handles `tool.v1.request.execute`,
+/// routes to the appropriate tool capsule via `tool.v1.execute.<name>`,
+/// and collects results on `tool.v1.execute.*.result`.
+interface tool {
+    use astrid:types/types.{tool-call, tool-call-result};
+
+    /// Request to cancel in-flight tool executions.
+    record cancel-request {
+        call-ids: list<string>,
+    }
+}

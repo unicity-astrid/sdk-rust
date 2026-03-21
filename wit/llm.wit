@@ -1,0 +1,59 @@
+package astrid:llm@1.0.0;
+
+/// LLM interface — streaming text generation with tool use support.
+///
+/// A capsule exporting this interface handles `llm.v1.request.generate.*`
+/// events and publishes `llm.v1.stream.*` streaming responses.
+interface llm {
+    use astrid:types/types.{message, tool-definition, usage};
+
+    /// Request to generate a response.
+    record generate-request {
+        request-id: string,
+        model: string,
+        messages: list<message>,
+        tools: list<tool-definition>,
+        system-prompt: string,
+    }
+
+    /// A streaming event from the provider.
+    variant stream-event {
+        text-delta(string),
+        tool-call-start(tool-call-start-event),
+        tool-call-delta(tool-call-delta-event),
+        tool-call-end(tool-call-end-event),
+        reasoning-delta(string),
+        usage(usage),
+        done,
+        error(string),
+    }
+
+    record tool-call-start-event {
+        id: string,
+        name: string,
+    }
+
+    record tool-call-delta-event {
+        id: string,
+        args-delta: string,
+    }
+
+    record tool-call-end-event {
+        id: string,
+    }
+
+    /// Final (non-streaming) response.
+    record generate-response {
+        message: message,
+        has-tool-calls: bool,
+        stop-reason: stop-reason,
+        usage: usage,
+    }
+
+    enum stop-reason {
+        end-turn,
+        max-tokens,
+        tool-use,
+        stop-sequence,
+    }
+}

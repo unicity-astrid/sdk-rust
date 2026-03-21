@@ -1,0 +1,65 @@
+package astrid:types@1.0.0;
+
+/// Shared types used across Astrid interfaces.
+///
+/// Foundation types for messages, tool calls, and token usage.
+/// Imported by llm, session, prompt, context, and tool interfaces.
+interface types {
+    /// A conversation message.
+    record message {
+        role: message-role,
+        content: message-content,
+    }
+
+    enum message-role {
+        system,
+        user,
+        assistant,
+        tool,
+    }
+
+    /// Message content — text, tool calls, tool results, or mixed.
+    variant message-content {
+        text(string),
+        tool-calls(list<tool-call>),
+        tool-result(tool-call-result),
+        multi-part(list<content-part>),
+    }
+
+    variant content-part {
+        text(string),
+        image(image-data),
+    }
+
+    record image-data {
+        data: string,
+        media-type: string,
+    }
+
+    /// A tool call requested by the model.
+    record tool-call {
+        call-id: string,
+        tool-name: string,
+        arguments: string,
+    }
+
+    /// Result of executing a tool call.
+    record tool-call-result {
+        call-id: string,
+        content: string,
+        is-error: bool,
+    }
+
+    /// A tool definition provided to the model.
+    record tool-definition {
+        name: string,
+        description: option<string>,
+        input-schema: string,
+    }
+
+    /// Token usage statistics.
+    record usage {
+        input-tokens: u64,
+        output-tokens: u64,
+    }
+}

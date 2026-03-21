@@ -1,0 +1,39 @@
+package astrid:registry@1.0.0;
+
+/// Registry interface — LLM provider discovery and model management.
+///
+/// A capsule exporting this interface handles `registry.v1.*` requests,
+/// discovers available LLM providers from loaded capsule metadata, and
+/// manages the active model selection.
+interface registry {
+    /// An available LLM provider entry.
+    record provider-entry {
+        id: string,
+        description: string,
+        capsule: string,
+        capabilities: list<string>,
+    }
+
+    /// Request to list available providers.
+    record get-providers-request {
+        correlation-id: option<string>,
+    }
+
+    /// Response with available providers.
+    record get-providers-response {
+        providers: list<provider-entry>,
+        active-model: option<string>,
+    }
+
+    /// Request to change the active model.
+    record set-active-model-request {
+        model-id: string,
+    }
+
+    /// Event emitted when the active model changes.
+    record active-model-changed-event {
+        previous: option<string>,
+        current: string,
+        capsule: string,
+    }
+}
