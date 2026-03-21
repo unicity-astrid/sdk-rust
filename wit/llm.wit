@@ -21,7 +21,7 @@ interface provider {
         text-delta(string),
         tool-call-start(tool-call-start-event),
         tool-call-delta(tool-call-delta-event),
-        tool-call-end(string),
+        tool-call-end(tool-call-end-event),
         reasoning-delta(string),
         usage(usage),
         done,
@@ -36,6 +36,10 @@ interface provider {
     record tool-call-delta-event {
         id: string,
         args-delta: string,
+    }
+
+    record tool-call-end-event {
+        id: string,
     }
 
     /// Final (non-streaming) response.
