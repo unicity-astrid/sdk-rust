@@ -88,10 +88,8 @@ fn capsule_impl(
     // Extract doc comments from the impl block as the capsule-level description.
     let capsule_description = extract_doc_comments(&input.attrs);
 
-    let mut tool_arms = Vec::new();
     let mut command_arms = Vec::new();
     let mut hook_arms = Vec::new();
-    let mut cron_arms = Vec::new();
     let mut schema_arms = Vec::new();
     let mut install_method: Option<syn::Ident> = None;
     let mut upgrade_method: Option<syn::Ident> = None;
@@ -311,8 +309,106 @@ fn capsule_impl(
                 };
 
                 if attr_name == "tool" {
-                    tool_arms.push(quote! {
-                        #name_val => { #execute_block }
+                    // Tools are now routed through `astrid_hook_trigger` as
+                    // interceptor actions named `"tool_execute_<tool_name>"`.
+                    // The interceptor payload carries the IPC ToolExecuteRequest
+                    // fields (call_id, tool_name, arguments). Results are
+                    // published back via IPC rather than returned directly.
+                    let action_name = format!("tool_execute_{name_val}");
+
+                    // Build the call expression that invokes the user's method.
+                    // For tools with args, we deserialize from the JSON `arguments` Value.
+                    let tool_call_expr = if arg_type.is_some() {
+                        quote! {
+                            let args = ::serde_json::from_value(tool_req.arguments.clone())
+                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool arguments: {}", e)))?;
+                            instance.#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                        }
+                    } else {
+                        quote! {
+                            instance.#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                        }
+                    };
+
+                    let tool_call_expr_stateless = if arg_type.is_some() {
+                        quote! {
+                            let args = ::serde_json::from_value(tool_req.arguments.clone())
+                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool arguments: {}", e)))?;
+                            get_instance().#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                        }
+                    } else {
+                        quote! {
+                            get_instance().#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                        }
+                    };
+
+                    let tool_execute_block = if is_stateful {
+                        quote! {
+                            let tool_req: __AstridToolExecPayload = ::serde_json::from_slice(&req.arguments)
+                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool execute payload: {}", e)))?;
+                            let call_id = tool_req.call_id.clone();
+                            let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
+                                Ok(state) => state,
+                                Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
+                                Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e)).into()),
+                            };
+                            let result_str = match (|| -> Result<String, ::extism_pdk::Error> {
+                                let result = { #tool_call_expr };
+                                let serialized = ::serde_json::to_string(&result)
+                                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool result: {}", e)))?;
+                                Ok(serialized)
+                            })() {
+                                Ok(s) => (s, false),
+                                Err(e) => (format!("{}", e), true),
+                            };
+                            ::astrid_sdk::prelude::kv::set_json("__state", &instance)
+                                .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                            let ipc_result = ::serde_json::json!({
+                                "type": "tool_execute_result",
+                                "call_id": call_id,
+                                "result": {
+                                    "call_id": call_id,
+                                    "content": result_str.0,
+                                    "is_error": result_str.1,
+                                }
+                            });
+                            let topic = format!("tool.v1.execute.{}.result", #name_val);
+                            ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result)
+                                .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                            return Ok(vec![]);
+                        }
+                    } else {
+                        quote! {
+                            let tool_req: __AstridToolExecPayload = ::serde_json::from_slice(&req.arguments)
+                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool execute payload: {}", e)))?;
+                            let call_id = tool_req.call_id.clone();
+                            let result_str = match (|| -> Result<String, ::extism_pdk::Error> {
+                                let result = { #tool_call_expr_stateless };
+                                let serialized = ::serde_json::to_string(&result)
+                                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool result: {}", e)))?;
+                                Ok(serialized)
+                            })() {
+                                Ok(s) => (s, false),
+                                Err(e) => (format!("{}", e), true),
+                            };
+                            let ipc_result = ::serde_json::json!({
+                                "type": "tool_execute_result",
+                                "call_id": call_id,
+                                "result": {
+                                    "call_id": call_id,
+                                    "content": result_str.0,
+                                    "is_error": result_str.1,
+                                }
+                            });
+                            let topic = format!("tool.v1.execute.{}.result", #name_val);
+                            ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result)
+                                .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                            return Ok(vec![]);
+                        }
+                    };
+
+                    hook_arms.push(quote! {
+                        #action_name => { #tool_execute_block }
                     });
 
                     // Automatically generate schemars extraction for this tool.
@@ -367,13 +463,50 @@ fn capsule_impl(
                     hook_arms.push(quote! {
                         #name_val => { #execute_block }
                     });
-                } else if attr_name == "cron" {
-                    cron_arms.push(quote! {
-                        #name_val => { #execute_block }
-                    });
                 }
             }
         }
+    }
+
+    // If there are any tools, generate a shared `tool_describe` interceptor arm
+    // that returns schemas for all tools when requested.
+    if !schema_arms.is_empty() {
+        let capsule_description_for_describe = if let Some(desc) = &capsule_description {
+            quote! { Some(#desc) }
+        } else {
+            quote! { None }
+        };
+
+        hook_arms.push(quote! {
+            "tool_describe" => {
+                // Deserialize the request to get the response topic
+                #[derive(::serde::Deserialize)]
+                struct __AstridToolDescribeRequest {
+                    response_topic: String,
+                }
+                let describe_req: __AstridToolDescribeRequest = ::serde_json::from_slice(&req.arguments)
+                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool_describe payload: {}", e)))?;
+
+                let mut map: ::std::collections::BTreeMap<String, ::astrid_sdk::schemars::schema::RootSchema> = ::std::collections::BTreeMap::new();
+                #( #schema_arms )*
+
+                let capsule_desc: Option<&str> = #capsule_description_for_describe;
+                let response = if let Some(desc) = capsule_desc {
+                    let mut export = ::serde_json::Map::new();
+                    export.insert("tools".to_string(), ::serde_json::to_value(&map)
+                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tools: {}", e)))?);
+                    export.insert("description".to_string(), ::serde_json::Value::String(desc.to_string()));
+                    ::serde_json::Value::Object(export)
+                } else {
+                    ::serde_json::to_value(&map)
+                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize schemas: {}", e)))?
+                };
+
+                ::astrid_sdk::prelude::ipc::publish_json(&describe_req.response_topic, &response)
+                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                return Ok(vec![]);
+            }
+        });
     }
 
     let instance_block = if is_stateful {
@@ -559,12 +692,6 @@ fn capsule_impl(
     // `plugin_fn` strips all outer attributes and generates a bare `#[no_mangle]`
     // wrapper, losing any `#[expect(missing_docs)]` we attach — so we bypass it.
 
-    let capsule_description_tokens = if let Some(desc) = &capsule_description {
-        quote! { Some(#desc) }
-    } else {
-        quote! { None }
-    };
-
     let expanded = quote! {
         #input
 
@@ -585,33 +712,16 @@ fn capsule_impl(
             arguments: Vec<u8>,
         }
 
-        #instance_block
-
-        /// WASM ABI: Executed by the LLM Agent via the OS Event Bus.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn astrid_tool_call() -> i32 {
-            fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                let req: __AstridToolRequest = ::serde_json::from_slice(&input)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                match req.name.as_str() {
-                    #( #tool_arms )*
-                    _ => return Err(::extism_pdk::Error::msg("Unknown tool").into()),
-                }
-            }
-            let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-            let output = match inner(input) {
-                core::result::Result::Ok(x) => x,
-                core::result::Result::Err(rc) => {
-                    let err = format!("{:?}", rc.0);
-                    if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                        unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                    }
-                    return rc.1;
-                }
-            };
-            ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-            0
+        /// Deserialization helper for tool execution IPC payloads.
+        /// Mirrors the fields from `IpcPayload::ToolExecuteRequest`.
+        #[derive(::serde::Deserialize)]
+        struct __AstridToolExecPayload {
+            call_id: String,
+            tool_name: String,
+            arguments: ::serde_json::Value,
         }
+
+        #instance_block
 
         /// WASM ABI: Executed by a human typing a slash-command in an Uplink (CLI/Telegram).
         #[unsafe(no_mangle)]
@@ -639,7 +749,8 @@ fn capsule_impl(
             0
         }
 
-        /// WASM ABI: Executed synchronously by the Kernel during OS lifecycle events (Interceptors).
+        /// WASM ABI: Executed synchronously by the Kernel during OS lifecycle events.
+        /// Handles both interceptor hooks and tool execution/describe actions.
         #[unsafe(no_mangle)]
         pub extern "C" fn astrid_hook_trigger() -> i32 {
             fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
@@ -649,76 +760,6 @@ fn capsule_impl(
                     #( #hook_arms )*
                     _ => return Err(::extism_pdk::Error::msg("Unknown hook").into()),
                 }
-            }
-            let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-            let output = match inner(input) {
-                core::result::Result::Ok(x) => x,
-                core::result::Result::Err(rc) => {
-                    let err = format!("{:?}", rc.0);
-                    if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                        unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                    }
-                    return rc.1;
-                }
-            };
-            ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-            0
-        }
-
-        /// WASM ABI: Executed by the Kernel's scheduler when a static or dynamic cron job fires.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn astrid_cron_trigger() -> i32 {
-            fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                let req: __AstridToolRequest = ::serde_json::from_slice(&input)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                match req.name.as_str() {
-                    #( #cron_arms )*
-                    _ => return Err(::extism_pdk::Error::msg("Unknown cron job").into()),
-                }
-            }
-            let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-            let output = match inner(input) {
-                core::result::Result::Ok(x) => x,
-                core::result::Result::Err(rc) => {
-                    let err = format!("{:?}", rc.0);
-                    if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                        unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                    }
-                    return rc.1;
-                }
-            };
-            ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-            0
-        }
-
-        /// WASM ABI: Auto-generated schema export for CLI builders.
-        ///
-        /// Returns JSON with:
-        /// - `"tools"`: `BTreeMap<String, RootSchema>` — tool name → JSON schema
-        /// - `"description"`: `Option<String>` — capsule-level description from doc comments
-        #[unsafe(no_mangle)]
-        pub extern "C" fn astrid_export_schemas() -> i32 {
-            fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                let _ = input;
-                let mut map: ::std::collections::BTreeMap<String, ::astrid_sdk::schemars::schema::RootSchema> = ::std::collections::BTreeMap::new();
-                #( #schema_arms )*
-
-                // When a capsule description exists, use the new wrapped format:
-                //   { "tools": { ... }, "description": "..." }
-                // Otherwise, use the legacy flat format for backward compatibility:
-                //   { "tool_name": { schema }, ... }
-                let capsule_desc: Option<&str> = #capsule_description_tokens;
-                let json = if let Some(desc) = capsule_desc {
-                    let mut export = ::serde_json::Map::new();
-                    export.insert("tools".to_string(), ::serde_json::to_value(&map)
-                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tools: {}", e)))?);
-                    export.insert("description".to_string(), ::serde_json::Value::String(desc.to_string()));
-                    ::serde_json::to_vec(&export)
-                } else {
-                    ::serde_json::to_vec(&map)
-                }
-                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize schemas: {}", e)))?;
-                Ok(json)
             }
             let input = ::extism_pdk::unwrap!(::extism_pdk::input());
             let output = match inner(input) {
@@ -941,10 +982,19 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        // Tool dispatch should still be generated
+        // Tool dispatch should be routed through astrid_hook_trigger
         assert!(
-            output.contains("astrid_tool_call"),
-            "Should still generate astrid_tool_call without lifecycle attrs"
+            output.contains("astrid_hook_trigger"),
+            "Should generate astrid_hook_trigger for tool dispatch"
+        );
+        assert!(
+            output.contains("tool_execute_do_thing"),
+            "Should generate tool_execute_do_thing interceptor arm"
+        );
+        // astrid_tool_call should no longer be generated
+        assert!(
+            !output.contains("astrid_tool_call"),
+            "Should not generate legacy astrid_tool_call"
         );
         assert!(
             !output.contains("astrid_install"),
@@ -1457,8 +1507,8 @@ mod tests {
 
         let output = capsule_impl(attr, input).to_string();
         assert!(
-            output.contains("astrid_tool_call"),
-            "Should generate tool dispatch"
+            output.contains("tool_execute_search"),
+            "Should generate tool_execute_search interceptor arm"
         );
         assert!(
             output.contains("astrid_install"),
@@ -1490,10 +1540,10 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        // Tool dispatch must persist state (stateful capsule)
+        // Tool dispatch must persist state (stateful capsule) — now via hook trigger
         let tool_pos = output
-            .find("astrid_tool_call")
-            .expect("tool export missing");
+            .find("tool_execute_search")
+            .expect("tool interceptor arm missing");
         let tool_section = &output[tool_pos..];
         assert!(
             tool_section.contains("set_json"),
@@ -1634,8 +1684,8 @@ mod tests {
 
         let output = capsule_impl(attr, input).to_string();
         let tool_pos = output
-            .find("astrid_tool_call")
-            .expect("tool export missing");
+            .find("tool_execute_update")
+            .expect("tool interceptor arm missing");
         let section = &output[tool_pos..];
         assert!(
             section.contains("get_json"),
@@ -1666,8 +1716,8 @@ mod tests {
             "Stateless tool dispatch must use singleton via get_instance"
         );
         let tool_pos = output
-            .find("astrid_tool_call")
-            .expect("tool export missing");
+            .find("tool_execute_read")
+            .expect("tool interceptor arm missing");
         let section = &output[tool_pos..];
         assert!(
             !section.contains("get_json"),
@@ -1750,8 +1800,8 @@ mod tests {
 
         let output = capsule_impl(attr, input).to_string();
         let pos = output
-            .find("astrid_tool_call")
-            .expect("tool export missing");
+            .find("tool_execute_query")
+            .expect("tool interceptor arm missing");
         let section = &output[pos..];
         assert!(
             section.contains("get_json"),
