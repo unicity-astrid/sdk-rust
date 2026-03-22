@@ -342,69 +342,53 @@ fn capsule_impl(
                         }
                     };
 
-                    let tool_execute_block = if is_stateful {
-                        quote! {
-                            let tool_req: __AstridToolExecPayload = ::serde_json::from_slice(&req.arguments)
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool execute payload: {}", e)))?;
-                            let call_id = tool_req.call_id.clone();
-                            let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
-                                Ok(state) => state,
-                                Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
-                                Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e)).into()),
-                            };
-                            let result_str = match (|| -> Result<String, ::extism_pdk::Error> {
-                                let result = { #tool_call_expr };
-                                let serialized = ::serde_json::to_string(&result)
-                                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool result: {}", e)))?;
-                                Ok(serialized)
-                            })() {
-                                Ok(s) => (s, false),
-                                Err(e) => (format!("{}", e), true),
-                            };
-                            ::astrid_sdk::prelude::kv::set_json("__state", &instance)
-                                .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                            let ipc_result = ::serde_json::json!({
-                                "type": "tool_execute_result",
-                                "call_id": call_id,
-                                "result": {
-                                    "call_id": call_id,
-                                    "content": result_str.0,
-                                    "is_error": result_str.1,
-                                }
-                            });
-                            let topic = format!("tool.v1.execute.{}.result", #name_val);
-                            ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result)
-                                .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                            return Ok(vec![]);
-                        }
+                    let (call_expr, state_setup, state_teardown) = if is_stateful {
+                        (
+                            tool_call_expr,
+                            quote! {
+                                let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
+                                    Ok(state) => state,
+                                    Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
+                                    Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e)).into()),
+                                };
+                            },
+                            quote! {
+                                ::astrid_sdk::prelude::kv::set_json("__state", &instance)
+                                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                            },
+                        )
                     } else {
-                        quote! {
-                            let tool_req: __AstridToolExecPayload = ::serde_json::from_slice(&req.arguments)
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool execute payload: {}", e)))?;
-                            let call_id = tool_req.call_id.clone();
-                            let result_str = match (|| -> Result<String, ::extism_pdk::Error> {
-                                let result = { #tool_call_expr_stateless };
-                                let serialized = ::serde_json::to_string(&result)
-                                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool result: {}", e)))?;
-                                Ok(serialized)
-                            })() {
-                                Ok(s) => (s, false),
-                                Err(e) => (format!("{}", e), true),
-                            };
-                            let ipc_result = ::serde_json::json!({
-                                "type": "tool_execute_result",
+                        (tool_call_expr_stateless, quote! {}, quote! {})
+                    };
+
+                    let tool_execute_block = quote! {
+                        let tool_req: __AstridToolExecPayload = ::serde_json::from_slice(&req.arguments)
+                            .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool execute payload: {}", e)))?;
+                        let call_id = tool_req.call_id;
+                        #state_setup
+                        let result_str = match (|| -> Result<String, ::extism_pdk::Error> {
+                            let result = { #call_expr };
+                            let serialized = ::serde_json::to_string(&result)
+                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool result: {}", e)))?;
+                            Ok(serialized)
+                        })() {
+                            Ok(s) => (s, false),
+                            Err(e) => (format!("{}", e), true),
+                        };
+                        #state_teardown
+                        let ipc_result = ::serde_json::json!({
+                            "type": "tool_execute_result",
+                            "call_id": call_id.clone(),
+                            "result": {
                                 "call_id": call_id,
-                                "result": {
-                                    "call_id": call_id,
-                                    "content": result_str.0,
-                                    "is_error": result_str.1,
-                                }
-                            });
-                            let topic = format!("tool.v1.execute.{}.result", #name_val);
-                            ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result)
-                                .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                            return Ok(vec![]);
-                        }
+                                "content": result_str.0,
+                                "is_error": result_str.1,
+                            }
+                        });
+                        let topic = format!("tool.v1.execute.{}.result", #name_val);
+                        ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result)
+                            .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                        return Ok(vec![]);
                     };
 
                     hook_arms.push(quote! {
