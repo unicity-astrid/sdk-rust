@@ -9,6 +9,22 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-23
+
+### Changed
+
+- **Tools are now IPC convention.** `#[astrid::tool]` macro rewired to generate interceptor arms in `astrid_hook_trigger` instead of a separate `astrid_tool_call` WASM export. Each tool generates a `tool_execute_<name>` action (deserializes `ToolExecuteRequest`, calls handler, publishes result to `tool.v1.execute.<name>.result` via IPC) and a shared `tool_describe` action (returns all tool schemas as JSON). Capsule code using `#[astrid::tool]` compiles unchanged — only the generated glue changes.
+
+### Added
+
+- WIT interface definitions for all standard contracts: llm, session, spark, context, prompt, tool, hook, registry, types (`wit/` directory)
+
+### Removed
+
+- `astrid_tool_call` WASM export — replaced by `tool_execute_<name>` interceptor arms in `astrid_hook_trigger`
+- `astrid_export_schemas` WASM export — replaced by `tool_describe` interceptor arm
+- `astrid_cron_trigger` WASM export — dead code, cron was never implemented
+
 ## [0.4.0] - 2026-03-19
 
 ### Added
