@@ -481,8 +481,8 @@ fn capsule_impl(
                         .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize schemas: {}", e)))?
                 };
 
-                ::serde_json::to_vec(&response)
-                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool_describe response: {}", e)))
+                Ok(::serde_json::to_vec(&response)
+                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool_describe response: {}", e)))?)
             }
         });
     }
