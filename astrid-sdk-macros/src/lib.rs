@@ -463,14 +463,9 @@ fn capsule_impl(
 
         hook_arms.push(quote! {
             "tool_describe" => {
-                // Deserialize the request to get the response topic
-                #[derive(::serde::Deserialize)]
-                struct __AstridToolDescribeRequest {
-                    response_topic: String,
-                }
-                let describe_req: __AstridToolDescribeRequest = ::serde_json::from_slice(&req.arguments)
-                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool_describe payload: {}", e)))?;
-
+                // Build tool schemas and return them directly as JSON bytes.
+                // The kernel's hooks::trigger() collects the return value from each
+                // interceptor — no response_topic IPC roundtrip needed.
                 let mut map: ::std::collections::BTreeMap<String, ::astrid_sdk::schemars::schema::RootSchema> = ::std::collections::BTreeMap::new();
                 #( #schema_arms )*
 
@@ -486,9 +481,8 @@ fn capsule_impl(
                         .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize schemas: {}", e)))?
                 };
 
-                ::astrid_sdk::prelude::ipc::publish_json(&describe_req.response_topic, &response)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                return Ok(vec![]);
+                ::serde_json::to_vec(&response)
+                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool_describe response: {}", e)))
             }
         });
     }
