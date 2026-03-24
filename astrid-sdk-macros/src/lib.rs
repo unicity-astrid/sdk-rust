@@ -408,35 +408,40 @@ fn capsule_impl(
 
                     if let Some(ty) = &arg_type {
                         schema_arms.push(quote! {
-                            let mut schema = ::astrid_sdk::schemars::schema_for!(#ty);
-                            schema.schema.extensions.insert(
-                                "mutable".to_string(),
-                                ::serde_json::json!(#is_mutable),
-                            );
-                            #desc_insertion
-                            map.insert(#name_val.to_string(), schema);
+                            {
+                                let mut schema = ::astrid_sdk::schemars::schema_for!(#ty);
+                                schema.schema.extensions.insert(
+                                    "mutable".to_string(),
+                                    ::serde_json::json!(#is_mutable),
+                                );
+                                #desc_insertion
+                                let desc_str: &str = schema.schema.metadata
+                                    .as_ref()
+                                    .and_then(|m| m.description.as_deref())
+                                    .unwrap_or("");
+                                let mut input_schema = ::serde_json::to_value(&schema)
+                                    .unwrap_or(::serde_json::json!({"type": "object"}));
+                                // Ensure `properties` exists — OpenAI function calling API requires it
+                                // even for empty structs where schemars omits it.
+                                if let Some(obj) = input_schema.as_object_mut() {
+                                    obj.entry("properties").or_insert(::serde_json::json!({}));
+                                }
+                                tools.push(::serde_json::json!({
+                                    "name": #name_val,
+                                    "description": desc_str,
+                                    "input_schema": input_schema,
+                                }));
+                            }
                         });
                     } else {
                         schema_arms.push(quote! {
-                            // For parameterless tools, we generate an empty object schema
-                            let mut obj = ::astrid_sdk::schemars::schema::SchemaObject {
-                                instance_type: Some(::astrid_sdk::schemars::schema::SingleOrVec::Single(
-                                    Box::new(::astrid_sdk::schemars::schema::InstanceType::Object)
-                                )),
-                                ..Default::default()
-                            };
-                            obj.extensions.insert(
-                                "mutable".to_string(),
-                                ::serde_json::json!(#is_mutable),
-                            );
-
-                            let mut schema = ::astrid_sdk::schemars::schema::RootSchema {
-                                meta_schema: Some("http://json-schema.org/draft-07/schema#".to_string()),
-                                schema: obj,
-                                definitions: ::std::collections::BTreeMap::new(),
-                            };
-                            #desc_insertion
-                            map.insert(#name_val.to_string(), schema);
+                            {
+                                tools.push(::serde_json::json!({
+                                    "name": #name_val,
+                                    "description": "",
+                                    "input_schema": { "type": "object", "properties": {} },
+                                }));
+                            }
                         });
                     }
                 } else if attr_name == "command" {
@@ -463,23 +468,16 @@ fn capsule_impl(
 
         hook_arms.push(quote! {
             "tool_describe" => {
-                // Build tool schemas and return them directly as JSON bytes.
-                // The kernel's hooks::trigger() collects the return value from each
-                // interceptor — no response_topic IPC roundtrip needed.
-                let mut map: ::std::collections::BTreeMap<String, ::astrid_sdk::schemars::schema::RootSchema> = ::std::collections::BTreeMap::new();
+                // Build tool list as an array of {name, description, input_schema} objects.
+                // Format matches the MCP bridge and what the prompt-builder expects.
+                let mut tools: Vec<::serde_json::Value> = Vec::new();
                 #( #schema_arms )*
 
                 let capsule_desc: Option<&str> = #capsule_description_for_describe;
-                let response = if let Some(desc) = capsule_desc {
-                    let mut export = ::serde_json::Map::new();
-                    export.insert("tools".to_string(), ::serde_json::to_value(&map)
-                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tools: {}", e)))?);
-                    export.insert("description".to_string(), ::serde_json::Value::String(desc.to_string()));
-                    ::serde_json::Value::Object(export)
-                } else {
-                    ::serde_json::to_value(&map)
-                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize schemas: {}", e)))?
-                };
+                let response = ::serde_json::json!({
+                    "tools": tools,
+                    "description": capsule_desc.unwrap_or(""),
+                });
 
                 Ok(::serde_json::to_vec(&response)
                     .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool_describe response: {}", e)))?)
