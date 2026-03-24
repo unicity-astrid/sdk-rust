@@ -142,13 +142,14 @@ impl Iterator for ReadDir {
 /// Check if a path exists. Like [`std::fs::exists`] (nightly).
 pub fn exists(path: impl AsRef<[u8]>) -> Result<bool, SysError> {
     let result = unsafe { astrid_fs_exists(path.as_ref().to_vec())? };
-    Ok(!result.is_empty() && result[0] != 0)
+    let decoded = crate::host_result::decode(result)?;
+    Ok(!decoded.is_empty() && decoded[0] != 0)
 }
 
 /// Read the entire contents of a file as bytes. Like [`std::fs::read`].
 pub fn read(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
     let result = unsafe { astrid_read_file(path.as_ref().to_vec())? };
-    Ok(result)
+    crate::host_result::decode(result)
 }
 
 /// Read the entire contents of a file as a string. Like [`std::fs::read_to_string`].
@@ -174,7 +175,8 @@ pub fn create_dir(path: impl AsRef<[u8]>) -> Result<(), SysError> {
 /// Returns an iterator over the entries in the directory. The host resolves
 /// all entries in a single call, so the iterator is fully materialized.
 pub fn read_dir(path: impl AsRef<[u8]>) -> Result<ReadDir, SysError> {
-    let result = unsafe { astrid_fs_readdir(path.as_ref().to_vec())? };
+    let raw = unsafe { astrid_fs_readdir(path.as_ref().to_vec())? };
+    let result = crate::host_result::decode(raw)?;
     let path_str = String::from_utf8_lossy(path.as_ref());
     let parent = if path_str.ends_with('/') || path_str.is_empty() {
         path_str.into_owned()
@@ -200,7 +202,8 @@ pub fn read_dir(path: impl AsRef<[u8]>) -> Result<ReadDir, SysError> {
 
 /// Get file metadata. Like [`std::fs::metadata`].
 pub fn metadata(path: impl AsRef<[u8]>) -> Result<Metadata, SysError> {
-    let result = unsafe { astrid_fs_stat(path.as_ref().to_vec())? };
+    let raw = unsafe { astrid_fs_stat(path.as_ref().to_vec())? };
+    let result = crate::host_result::decode(raw)?;
     #[derive(Deserialize)]
     struct RawMetadata {
         size: u64,

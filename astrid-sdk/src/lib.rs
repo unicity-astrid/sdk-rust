@@ -113,6 +113,7 @@ pub enum SysError {
 }
 
 pub mod fs;
+pub(crate) mod host_result;
 
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
 pub mod ipc {
@@ -248,8 +249,8 @@ pub mod kv {
     use super::*;
 
     pub fn get_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_kv_get(key.as_ref().to_vec())? };
-        Ok(result)
+        let raw = unsafe { astrid_kv_get(key.as_ref().to_vec())? };
+        crate::host_result::decode(raw)
     }
 
     pub fn set_bytes(key: impl AsRef<[u8]>, value: &[u8]) -> Result<(), SysError> {
@@ -283,7 +284,8 @@ pub mod kv {
     /// Returns an empty vec if no keys match. The prefix is matched
     /// against key names within the capsule's scoped namespace.
     pub fn list_keys(prefix: impl AsRef<[u8]>) -> Result<Vec<String>, SysError> {
-        let result = unsafe { astrid_kv_list_keys(prefix.as_ref().to_vec())? };
+        let raw = unsafe { astrid_kv_list_keys(prefix.as_ref().to_vec())? };
+        let result = crate::host_result::decode(raw)?;
         let keys: Vec<String> = serde_json::from_slice(&result)?;
         Ok(keys)
     }
@@ -293,7 +295,8 @@ pub mod kv {
     /// Returns the number of keys deleted. The prefix is matched
     /// against key names within the capsule's scoped namespace.
     pub fn clear_prefix(prefix: impl AsRef<[u8]>) -> Result<u64, SysError> {
-        let result = unsafe { astrid_kv_clear_prefix(prefix.as_ref().to_vec())? };
+        let raw = unsafe { astrid_kv_clear_prefix(prefix.as_ref().to_vec())? };
+        let result = crate::host_result::decode(raw)?;
         let count: u64 = serde_json::from_slice(&result)?;
         Ok(count)
     }
