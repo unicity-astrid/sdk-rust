@@ -297,6 +297,11 @@ fn capsule_impl(
                             .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
                         let res_json = ::serde_json::to_vec(&result)
                             .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize result: {}", e)))?;
+                        // If the result is JSON null (from () or None), return empty
+                        // bytes so the interceptor chain keeps the original payload.
+                        if res_json == b"null" {
+                            return Ok(vec![]);
+                        }
                         return Ok(res_json);
                     }
                 } else {
@@ -304,6 +309,11 @@ fn capsule_impl(
                         let result = #call_expr_stateless;
                         let res_json = ::serde_json::to_vec(&result)
                             .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize result: {}", e)))?;
+                        // If the result is JSON null (from () or None), return empty
+                        // bytes so the interceptor chain keeps the original payload.
+                        if res_json == b"null" {
+                            return Ok(vec![]);
+                        }
                         return Ok(res_json);
                     }
                 };
