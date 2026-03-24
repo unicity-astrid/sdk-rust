@@ -9,6 +9,35 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-03-24
+
+### Added
+
+- `host_result` module — canonical decoder for the `HostResult` wire format (`0x00` Ok + payload / `0x01` Err + message). All host functions that return data use this encoding instead of WASM traps for recoverable errors. (#25)
+
+### Changed
+
+- `fs::read`, `fs::metadata`, `fs::exists`, `fs::read_dir` — decode `HostResult` from kernel. File-not-found, permission denied, and VFS errors returned as `Err(SysError)` instead of crashing the capsule. (#25)
+- `kv::get_bytes`, `kv::list_keys`, `kv::clear_prefix` — decode `HostResult` from kernel. (#25)
+
+### Fixed
+
+- Interceptor chain payload corruption — interceptors returning `Result<(), SysError>` serialized `()` as `b"null"` (4 bytes), overwriting the chain payload for subsequent interceptors. Now returns empty bytes, preserving the original payload. (#25)
+
+## [0.5.2] - 2026-03-23
+
+### Fixed
+
+- `tool_describe` interceptor return value not wrapped in `Ok()` for `FnResult` compatibility — caused type mismatch at the Extism boundary. (#21)
+- `tool_describe` returned `BTreeMap` object (`{"tools": {"name": schema}}`) instead of array format (`{"tools": [{"name", "description", "input_schema"}]}`). Prompt-builder expected array, so 0 tool schemas were collected. (#23)
+- `EmptyArgs` tools missing `properties: {}` in input schema — OpenAI API requires this field. (#23)
+
+## [0.5.1] - 2026-03-23
+
+### Fixed
+
+- `tool_describe` interceptor parsed `response_topic` from payload and published schemas via IPC — incompatible with `hooks::trigger` which expects return bytes, not a publish. Now returns JSON bytes directly as the interceptor response. (#19)
+
 ## [0.5.0] - 2026-03-23
 
 ### Changed
