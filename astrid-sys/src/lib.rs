@@ -14,7 +14,14 @@
 #![deny(clippy::all)]
 #![deny(unreachable_pub)]
 
-wit_bindgen::generate!({
-    world: "capsule",
-    path: "../wit",
-});
+// wit-bindgen generates code with patterns that trip clippy (e.g. Vec::from_raw_parts
+// with same length and capacity). Suppress only for the generated module.
+#[allow(clippy::all, clippy::pedantic, unreachable_pub, unsafe_code)]
+mod generated {
+    wit_bindgen::generate!({
+        world: "capsule",
+        path: "../wit",
+    });
+}
+
+pub use generated::*;

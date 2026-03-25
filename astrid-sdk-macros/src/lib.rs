@@ -1,8 +1,8 @@
 //! Procedural macros for building Astrid OS User-Space Capsules.
 //!
 //! This crate provides the `#[astrid::capsule]` macro to automatically
-//! generate the required `extern "C"` WebAssembly exports and handle
-//! seamless JSON/Binary serialization across the OS boundary.
+//! generate the Component Model `impl Guest` trait implementation and
+//! `export!()` wiring for the Astrid WASM capsule world.
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
@@ -19,9 +19,9 @@ use syn::{ImplItem, ItemImpl};
 
 /// Marks an `impl` block as the entry point for an Astrid Capsule.
 ///
-/// This macro automatically generates the WebAssembly exports required by
-/// the Astrid Kernel (e.g., `execute-tool`) and routes incoming IPC/Tool
-/// requests to the appropriately annotated methods within the block.
+/// This macro automatically generates the Component Model `impl Guest`
+/// trait and `export!()` call required by the Astrid Kernel, routing
+/// incoming IPC/Tool/Hook requests to annotated methods within the block.
 #[proc_macro_attribute]
 pub fn capsule(attr: TokenStream, item: TokenStream) -> TokenStream {
     capsule_impl(attr.into(), item.into()).into()
@@ -257,31 +257,35 @@ fn capsule_impl(
                     }
                 }
 
+                // ---------------------------------------------------------
+                // Build call expressions for interceptors and commands
+                // ---------------------------------------------------------
+
                 let call_expr = if arg_type.is_some() {
                     quote! {
                         {
-                            let args = ::serde_json::from_slice(&req.arguments)
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse arguments: {}", e)))?;
-                            instance.#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                            let args = ::serde_json::from_slice(&payload)
+                                .map_err(|e| format!("failed to parse arguments: {}", e))?;
+                            instance.#method_name(args).map_err(|e| e.to_string())?
                         }
                     }
                 } else {
                     quote! {
-                        instance.#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                        instance.#method_name().map_err(|e| e.to_string())?
                     }
                 };
 
                 let call_expr_stateless = if arg_type.is_some() {
                     quote! {
                         {
-                            let args = ::serde_json::from_slice(&req.arguments)
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse arguments: {}", e)))?;
-                            get_instance().#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                            let args = ::serde_json::from_slice(&payload)
+                                .map_err(|e| format!("failed to parse arguments: {}", e))?;
+                            get_instance().#method_name(args).map_err(|e| e.to_string())?
                         }
                     }
                 } else {
                     quote! {
-                        get_instance().#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                        get_instance().#method_name().map_err(|e| e.to_string())?
                     }
                 };
 
@@ -290,36 +294,83 @@ fn capsule_impl(
                         let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
                             Ok(state) => state,
                             Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
-                            Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e)).into()),
+                            Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(format!("failed to load state: {}", e)),
+                            },
                         };
-                        let result = #call_expr;
-                        ::astrid_sdk::prelude::kv::set_json("__state", &instance)
-                            .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                        let res_json = ::serde_json::to_vec(&result)
-                            .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize result: {}", e)))?;
-                        // If the result is JSON null (from () or None), return empty
-                        // bytes so the interceptor chain keeps the original payload.
-                        if res_json == b"null" {
-                            return Ok(vec![]);
+                        let result = match (|| -> Result<_, String> {
+                            let val = #call_expr;
+                            Ok(val)
+                        })() {
+                            Ok(val) => val,
+                            Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(e),
+                            },
+                        };
+                        if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
+                            return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(format!("failed to save state: {}", e)),
+                            };
                         }
-                        return Ok(res_json);
+                        let res_json = match ::serde_json::to_string(&result) {
+                            Ok(s) => s,
+                            Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(format!("failed to serialize result: {}", e)),
+                            },
+                        };
+                        // If the result is JSON null (from () or None), return empty
+                        // data so the interceptor chain keeps the original payload.
+                        if res_json == "null" {
+                            return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "continue".into(),
+                                data: None,
+                            };
+                        }
+                        return ::astrid_sdk::astrid_sys::CapsuleResult {
+                            action: "continue".into(),
+                            data: Some(res_json),
+                        };
                     }
                 } else {
                     quote! {
-                        let result = #call_expr_stateless;
-                        let res_json = ::serde_json::to_vec(&result)
-                            .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize result: {}", e)))?;
+                        let result = match (|| -> Result<_, String> {
+                            let val = #call_expr_stateless;
+                            Ok(val)
+                        })() {
+                            Ok(val) => val,
+                            Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(e),
+                            },
+                        };
+                        let res_json = match ::serde_json::to_string(&result) {
+                            Ok(s) => s,
+                            Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(format!("failed to serialize result: {}", e)),
+                            },
+                        };
                         // If the result is JSON null (from () or None), return empty
-                        // bytes so the interceptor chain keeps the original payload.
-                        if res_json == b"null" {
-                            return Ok(vec![]);
+                        // data so the interceptor chain keeps the original payload.
+                        if res_json == "null" {
+                            return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "continue".into(),
+                                data: None,
+                            };
                         }
-                        return Ok(res_json);
+                        return ::astrid_sdk::astrid_sys::CapsuleResult {
+                            action: "continue".into(),
+                            data: Some(res_json),
+                        };
                     }
                 };
 
                 if attr_name == "tool" {
-                    // Tools are now routed through `astrid_hook_trigger` as
+                    // Tools are routed through `astrid_hook_trigger` as
                     // interceptor actions named `"tool_execute_<tool_name>"`.
                     // The interceptor payload carries the IPC ToolExecuteRequest
                     // fields (call_id, tool_name, arguments). Results are
@@ -331,24 +382,24 @@ fn capsule_impl(
                     let tool_call_expr = if arg_type.is_some() {
                         quote! {
                             let args = ::serde_json::from_value(tool_req.arguments.clone())
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool arguments: {}", e)))?;
-                            instance.#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                                .map_err(|e| format!("failed to parse tool arguments: {}", e))?;
+                            instance.#method_name(args).map_err(|e| e.to_string())?
                         }
                     } else {
                         quote! {
-                            instance.#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                            instance.#method_name().map_err(|e| e.to_string())?
                         }
                     };
 
                     let tool_call_expr_stateless = if arg_type.is_some() {
                         quote! {
                             let args = ::serde_json::from_value(tool_req.arguments.clone())
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool arguments: {}", e)))?;
-                            get_instance().#method_name(args).map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                                .map_err(|e| format!("failed to parse tool arguments: {}", e))?;
+                            get_instance().#method_name(args).map_err(|e| e.to_string())?
                         }
                     } else {
                         quote! {
-                            get_instance().#method_name().map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?
+                            get_instance().#method_name().map_err(|e| e.to_string())?
                         }
                     };
 
@@ -359,12 +410,45 @@ fn capsule_impl(
                                 let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
                                     Ok(state) => state,
                                     Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
-                                    Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e)).into()),
+                                    Err(e) => {
+                                        let _ = ::astrid_sdk::prelude::ipc::publish_json(
+                                            &format!("tool.v1.execute.{}.result", #name_val),
+                                            &::serde_json::json!({
+                                                "type": "tool_execute_result",
+                                                "call_id": tool_req.call_id,
+                                                "result": {
+                                                    "call_id": tool_req.call_id,
+                                                    "content": format!("failed to load state: {}", e),
+                                                    "is_error": true,
+                                                }
+                                            }),
+                                        );
+                                        return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                            action: "continue".into(),
+                                            data: None,
+                                        };
+                                    }
                                 };
                             },
                             quote! {
-                                ::astrid_sdk::prelude::kv::set_json("__state", &instance)
-                                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                                if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
+                                    let _ = ::astrid_sdk::prelude::ipc::publish_json(
+                                        &format!("tool.v1.execute.{}.result", #name_val),
+                                        &::serde_json::json!({
+                                            "type": "tool_execute_result",
+                                            "call_id": call_id.clone(),
+                                            "result": {
+                                                "call_id": call_id,
+                                                "content": format!("failed to save state: {}", e),
+                                                "is_error": true,
+                                            }
+                                        }),
+                                    );
+                                    return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                        action: "continue".into(),
+                                        data: None,
+                                    };
+                                }
                             },
                         )
                     } else {
@@ -372,14 +456,19 @@ fn capsule_impl(
                     };
 
                     let tool_execute_block = quote! {
-                        let tool_req: __AstridToolExecPayload = ::serde_json::from_slice(&req.arguments)
-                            .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse tool execute payload: {}", e)))?;
-                        let call_id = tool_req.call_id;
+                        let tool_req: __AstridToolExecPayload = match ::serde_json::from_slice(&payload) {
+                            Ok(r) => r,
+                            Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "error".into(),
+                                data: Some(format!("failed to parse tool execute payload: {}", e)),
+                            },
+                        };
+                        let call_id = tool_req.call_id.clone();
                         #state_setup
-                        let result_str = match (|| -> Result<String, ::extism_pdk::Error> {
+                        let result_str = match (|| -> Result<String, String> {
                             let result = { #call_expr };
                             let serialized = ::serde_json::to_string(&result)
-                                .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool result: {}", e)))?;
+                                .map_err(|e| format!("failed to serialize tool result: {}", e))?;
                             Ok(serialized)
                         })() {
                             Ok(s) => (s, false),
@@ -396,9 +485,11 @@ fn capsule_impl(
                             }
                         });
                         let topic = format!("tool.v1.execute.{}.result", #name_val);
-                        ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result)
-                            .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                        return Ok(vec![]);
+                        let _ = ::astrid_sdk::prelude::ipc::publish_json(&topic, &ipc_result);
+                        return ::astrid_sdk::astrid_sys::CapsuleResult {
+                            action: "continue".into(),
+                            data: None,
+                        };
                     };
 
                     hook_arms.push(quote! {
@@ -489,8 +580,11 @@ fn capsule_impl(
                     "description": capsule_desc.unwrap_or(""),
                 });
 
-                Ok(::serde_json::to_vec(&response)
-                    .map_err(|e| ::extism_pdk::Error::msg(format!("failed to serialize tool_describe response: {}", e)))?)
+                let data = ::serde_json::to_string(&response).ok();
+                return ::astrid_sdk::astrid_sys::CapsuleResult {
+                    action: "continue".into(),
+                    data,
+                };
             }
         });
     }
@@ -507,64 +601,57 @@ fn capsule_impl(
         }
     };
 
-    // Generate optional lifecycle exports (only when the attribute is present).
-    // For stateful capsules, persist state back to KV after the hook runs.
-    let install_export = install_method.map(|method_name| {
-        let body = if is_stateful {
+    // Commands are now dispatched inside astrid_hook_trigger alongside interceptors.
+    // Merge command arms into hook_arms so they're part of the same match.
+    hook_arms.extend(command_arms);
+
+    // --- Generate the `astrid_hook_trigger` body ---
+    let hook_trigger_body = if hook_arms.is_empty() {
+        quote! {
+            ::astrid_sdk::astrid_sys::CapsuleResult {
+                action: "error".into(),
+                data: Some(format!("unknown hook action: {}", action)),
+            }
+        }
+    } else {
+        quote! {
+            match action.as_str() {
+                #( #hook_arms )*
+                _ => ::astrid_sdk::astrid_sys::CapsuleResult {
+                    action: "error".into(),
+                    data: Some(format!("unknown hook action: {}", action)),
+                },
+            }
+        }
+    };
+
+    // --- Generate the install body ---
+    let install_body = if let Some(method_name) = &install_method {
+        if is_stateful {
             quote! {
-                // Install always starts from Default - there is no prior state
-                // on first activation. The binding is mut so that interior state
-                // changes (RefCell, etc.) are captured by serde serialization.
+                // Install always starts from Default - there is no prior state.
                 let mut instance = #struct_name::default();
-                instance.#method_name()
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                ::astrid_sdk::prelude::kv::set_json("__state", &instance)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                if let Err(e) = instance.#method_name() {
+                    let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
+                    return;
+                }
+                let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
             }
         } else {
             quote! {
                 let instance = #struct_name::default();
-                instance.#method_name()
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-            }
-        };
-        quote! {
-            /// WASM ABI: Called once on first install for capsule setup and elicitation.
-            /// For stateful capsules, the instance is persisted to KV after install.
-            /// Install always starts from `Default::default()` (no prior state exists).
-            #[unsafe(no_mangle)]
-            pub extern "C" fn astrid_install() -> i32 {
-                // Install takes no input - the kernel sends an empty payload.
-                // Input is ignored intentionally; reserved for future metadata.
-                fn inner(_input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                    #body
-                    let ok = ::serde_json::to_vec(&::serde_json::json!({"ok": true}))
-                        .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                    Ok(ok)
-                }
-                let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-                let output = match inner(input) {
-                    core::result::Result::Ok(x) => x,
-                    core::result::Result::Err(rc) => {
-                        let err = format!("{:?}", rc.0);
-                        if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                            unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                        }
-                        return rc.1;
-                    }
-                };
-                ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-                0
+                let _ = instance.#method_name();
             }
         }
-    });
+    } else {
+        quote! {}
+    };
 
-    let upgrade_export = upgrade_method.map(|method_name| {
-        let body = if is_stateful {
+    // --- Generate the upgrade body ---
+    let upgrade_body = if let Some(method_name) = &upgrade_method {
+        if is_stateful {
             quote! {
-                // JsonError covers key-not-found (host returns empty bytes which
-                // fail to parse) and corrupt state - both fall back to Default.
-                // HostError propagates hard - don't silently reset state on infra failures.
+                // Upgrade loads existing state; falls back to Default on deserialization failure.
                 let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
                     Ok(state) => state,
                     Err(e @ ::astrid_sdk::SysError::JsonError(_)) => {
@@ -573,59 +660,32 @@ fn capsule_impl(
                         );
                         Default::default()
                     }
-                    Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e))),
+                    Err(_e) => {
+                        return;
+                    }
                 };
-                instance.#method_name(&req.prev_version)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                ::astrid_sdk::prelude::kv::set_json("__state", &instance)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                // Read prev_version from capsule config (set by kernel before upgrade).
+                let prev_version = ::astrid_sdk::prelude::env::var("prev_version")
+                    .unwrap_or_default();
+                let _ = instance.#method_name(&prev_version);
+                let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
             }
         } else {
             quote! {
                 let instance = #struct_name::default();
-                instance.#method_name(&req.prev_version)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-            }
-        };
-        quote! {
-            /// WASM ABI: Called when upgrading from a previous version.
-            #[unsafe(no_mangle)]
-            pub extern "C" fn astrid_upgrade() -> i32 {
-                fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                    #[derive(::serde::Deserialize)]
-                    struct __AstridUpgradeRequest {
-                        prev_version: String,
-                    }
-                    let req: __AstridUpgradeRequest = ::serde_json::from_slice(&input)
-                        .map_err(|e| ::extism_pdk::Error::msg(format!("failed to parse upgrade request: {}", e)))?;
-                    #body
-                    let ok = ::serde_json::to_vec(&::serde_json::json!({"ok": true}))
-                        .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                    Ok(ok)
-                }
-                let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-                let output = match inner(input) {
-                    core::result::Result::Ok(x) => x,
-                    core::result::Result::Err(rc) => {
-                        let err = format!("{:?}", rc.0);
-                        if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                            unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                        }
-                        return rc.1;
-                    }
-                };
-                ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-                0
+                // Read prev_version from capsule config (set by kernel before upgrade).
+                let prev_version = ::astrid_sdk::prelude::env::var("prev_version")
+                    .unwrap_or_default();
+                let _ = instance.#method_name(&prev_version);
             }
         }
-    });
+    } else {
+        quote! {}
+    };
 
-    // Generate the run-loop export (like #[plugin_fn] pub fn run() but inside
-    // the capsule impl block). For stateful capsules, state is loaded at start
-    // but NOT auto-saved - run loops are long-lived and manage their own
-    // persistence. For stateless capsules, delegates to the static instance.
-    let run_export = run_method.map(|method_name| {
-        let body = if is_stateful {
+    // --- Generate the run body ---
+    let run_body = if let Some(method_name) = &run_method {
+        if is_stateful {
             quote! {
                 let instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
                     Ok(state) => state,
@@ -635,48 +695,20 @@ fn capsule_impl(
                         );
                         Default::default()
                     }
-                    Err(e) => return Err(::extism_pdk::Error::msg(format!("failed to load state: {}", e))),
+                    Err(_e) => {
+                        return;
+                    }
                 };
-                instance.#method_name()
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
+                let _ = instance.#method_name();
             }
         } else {
             quote! {
-                get_instance().#method_name()
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-            }
-        };
-        quote! {
-            /// WASM ABI: Long-lived run loop for event-driven capsules.
-            /// Generated by `#[astrid::run]` - replaces the old `#[plugin_fn] pub fn run()` pattern.
-            #[unsafe(no_mangle)]
-            pub extern "C" fn run() -> i32 {
-                fn inner(_input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                    #body
-                    Ok(vec![])
-                }
-                let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-                let output = match inner(input) {
-                    core::result::Result::Ok(x) => x,
-                    core::result::Result::Err(rc) => {
-                        let err = format!("{:?}", rc.0);
-                        if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                            unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                        }
-                        return rc.1;
-                    }
-                };
-                ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-                0
+                let _ = get_instance().#method_name();
             }
         }
-    });
-
-    // We inline the same pattern that `#[extism_pdk::plugin_fn]` would emit,
-    // but with `#[doc]` attributes so that `#![warn(missing_docs)]` is satisfied
-    // even when downstream crates compile with `-D warnings`.
-    // `plugin_fn` strips all outer attributes and generates a bare `#[no_mangle]`
-    // wrapper, losing any `#[expect(missing_docs)]` we attach — so we bypass it.
+    } else {
+        quote! {}
+    };
 
     let expanded = quote! {
         #input
@@ -688,15 +720,8 @@ fn capsule_impl(
         };
 
         // -------------------------------------------------------------------
-        // The Astrid OS Inbound ABI
+        // The Astrid OS Component Model ABI
         // -------------------------------------------------------------------
-
-        #[derive(::serde::Deserialize)]
-        struct __AstridToolRequest {
-            name: String,
-            #[serde(default)]
-            arguments: Vec<u8>,
-        }
 
         /// Deserialization helper for tool execution IPC payloads.
         /// Mirrors the fields from `IpcPayload::ToolExecuteRequest`.
@@ -709,62 +734,27 @@ fn capsule_impl(
 
         #instance_block
 
-        /// WASM ABI: Executed by a human typing a slash-command in an Uplink (CLI/Telegram).
-        #[unsafe(no_mangle)]
-        pub extern "C" fn astrid_command_run() -> i32 {
-            fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                let req: __AstridToolRequest = ::serde_json::from_slice(&input)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                match req.name.as_str() {
-                    #( #command_arms )*
-                    _ => return Err(::extism_pdk::Error::msg("Unknown command").into()),
-                }
+        struct __AstridExport;
+
+        impl ::astrid_sdk::astrid_sys::Guest for __AstridExport {
+            fn astrid_hook_trigger(action: String, payload: Vec<u8>) -> ::astrid_sdk::astrid_sys::CapsuleResult {
+                #hook_trigger_body
             }
-            let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-            let output = match inner(input) {
-                core::result::Result::Ok(x) => x,
-                core::result::Result::Err(rc) => {
-                    let err = format!("{:?}", rc.0);
-                    if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                        unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                    }
-                    return rc.1;
-                }
-            };
-            ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-            0
+
+            fn run() {
+                #run_body
+            }
+
+            fn astrid_install() {
+                #install_body
+            }
+
+            fn astrid_upgrade() {
+                #upgrade_body
+            }
         }
 
-        /// WASM ABI: Executed synchronously by the Kernel during OS lifecycle events.
-        /// Handles both interceptor hooks and tool execution/describe actions.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn astrid_hook_trigger() -> i32 {
-            fn inner(input: Vec<u8>) -> ::extism_pdk::FnResult<Vec<u8>> {
-                let req: __AstridToolRequest = ::serde_json::from_slice(&input)
-                    .map_err(|e| ::extism_pdk::Error::msg(e.to_string()))?;
-                match req.name.as_str() {
-                    #( #hook_arms )*
-                    _ => return Err(::extism_pdk::Error::msg("Unknown hook").into()),
-                }
-            }
-            let input = ::extism_pdk::unwrap!(::extism_pdk::input());
-            let output = match inner(input) {
-                core::result::Result::Ok(x) => x,
-                core::result::Result::Err(rc) => {
-                    let err = format!("{:?}", rc.0);
-                    if let Ok(mut mem) = ::extism_pdk::Memory::from_bytes(&err) {
-                        unsafe { ::extism_pdk::extism::error_set(mem.offset()); }
-                    }
-                    return rc.1;
-                }
-            };
-            ::extism_pdk::unwrap!(::extism_pdk::output(&output));
-            0
-        }
-
-        #install_export
-        #upgrade_export
-        #run_export
+        ::astrid_sdk::astrid_sys::export!(__AstridExport with_types_in ::astrid_sdk::astrid_sys);
     };
 
     expanded
@@ -902,10 +892,10 @@ mod tests {
             output.contains("astrid_install"),
             "Expected astrid_install export, got:\n{output}"
         );
-        // Should NOT generate upgrade
+        // Should NOT generate upgrade logic (method body should be empty)
         assert!(
-            !output.contains("astrid_upgrade"),
-            "Should not generate astrid_upgrade without #[astrid::upgrade]"
+            output.contains("fn astrid_upgrade"),
+            "Should always generate astrid_upgrade stub in Guest impl"
         );
         // Non-stateful install should NOT persist state
         assert!(
@@ -932,17 +922,13 @@ mod tests {
             "Expected astrid_upgrade export, got:\n{output}"
         );
         assert!(
-            output.contains("__AstridUpgradeRequest"),
-            "Upgrade export should generate __AstridUpgradeRequest deserialization struct"
+            output.contains("prev_version"),
+            "Upgrade export should reference prev_version"
         );
+        // Component Model: prev_version comes from env::var, not input bytes
         assert!(
-            output.contains("req . prev_version"),
-            "Upgrade export should pass req.prev_version to the method"
-        );
-        // Should NOT generate install
-        assert!(
-            !output.contains("astrid_install"),
-            "Should not generate astrid_install without #[astrid::install]"
+            output.contains("env :: var"),
+            "Upgrade export should read prev_version from env::var, got:\n{output}"
         );
         // Non-stateful upgrade should NOT load/persist state
         assert!(
@@ -977,19 +963,16 @@ mod tests {
             output.contains("tool_execute_do_thing"),
             "Should generate tool_execute_do_thing interceptor arm"
         );
-        // astrid_tool_call should no longer be generated
+        // Component Model always generates all four exports via Guest trait
         assert!(
-            !output.contains("astrid_tool_call"),
-            "Should not generate legacy astrid_tool_call"
+            output.contains("fn astrid_install"),
+            "Guest impl always has astrid_install"
         );
         assert!(
-            !output.contains("astrid_install"),
-            "Should not generate astrid_install without attribute"
+            output.contains("fn astrid_upgrade"),
+            "Guest impl always has astrid_upgrade"
         );
-        assert!(
-            !output.contains("astrid_upgrade"),
-            "Should not generate astrid_upgrade without attribute"
-        );
+        assert!(output.contains("fn run"), "Guest impl always has run");
     }
 
     #[test]
@@ -1261,10 +1244,10 @@ mod tests {
         );
         // Both must persist state
         let install_pos = output
-            .find("astrid_install")
+            .find("fn astrid_install")
             .expect("astrid_install missing");
         let upgrade_pos = output
-            .find("astrid_upgrade")
+            .find("fn astrid_upgrade")
             .expect("astrid_upgrade missing");
         // set_json must appear after both export names (in their respective bodies)
         let after_install = &output[install_pos..];
@@ -1349,13 +1332,8 @@ mod tests {
 
         let output = capsule_impl(attr, input).to_string();
         assert!(
-            output.contains("extern \"C\" fn run"),
-            "Expected run export, got:\n{output}"
-        );
-        // Should NOT generate lifecycle exports
-        assert!(
-            !output.contains("astrid_install"),
-            "Should not generate astrid_install without #[astrid::install]"
+            output.contains("fn run"),
+            "Expected run export in Guest impl, got:\n{output}"
         );
     }
 
@@ -1396,10 +1374,8 @@ mod tests {
             "Stateful run should load state via get_json, got:\n{output}"
         );
         // Run loops are infinite - should NOT auto-save state
-        // Find the generated extern export, not the user's method in the re-emitted impl.
-        let run_pos = output
-            .find("extern \"C\" fn run")
-            .expect("run export missing");
+        // Find the generated run method in the Guest impl.
+        let run_pos = output.find("fn run ()").expect("run export missing");
         let after_run = &output[run_pos..];
         assert!(
             !after_run.contains("set_json"),
@@ -1500,10 +1476,7 @@ mod tests {
             output.contains("astrid_install"),
             "Should generate install export"
         );
-        assert!(
-            output.contains("extern \"C\" fn run"),
-            "Should generate run export"
-        );
+        assert!(output.contains("fn run"), "Should generate run export");
     }
 
     /// Stateful capsule with both tools and run - verify tool dispatch calls
@@ -1536,9 +1509,7 @@ mod tests {
             "Stateful tool dispatch should call set_json"
         );
         // Run export must NOT persist state (run loops are infinite)
-        let run_pos = output
-            .find("extern \"C\" fn run")
-            .expect("run export missing");
+        let run_pos = output.find("fn run ()").expect("run export missing");
         let run_section = &output[run_pos..];
         assert!(
             !run_section.contains("set_json"),
@@ -1546,7 +1517,7 @@ mod tests {
         );
     }
 
-    /// Method named something other than "run" still generates extern "C" fn run.
+    /// Method named something other than "run" still generates fn run() in Guest impl.
     #[test]
     fn run_with_different_method_name() {
         let attr = quote::quote! {};
@@ -1560,10 +1531,10 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
-        // The WASM export must always be named "run" regardless of method name
+        // The Guest export must always be named "run" regardless of method name
         assert!(
-            output.contains("extern \"C\" fn run"),
-            "Should generate extern fn run even when method is event_loop"
+            output.contains("fn run"),
+            "Should generate fn run even when method is event_loop"
         );
         // The generated body should call the user's method by its original name
         assert!(
@@ -1757,9 +1728,10 @@ mod tests {
         };
 
         let output = capsule_impl(attr, input).to_string();
+        // Commands are now dispatched via hook trigger as well
         let pos = output
-            .find("astrid_command_run")
-            .expect("command export missing");
+            .find("astrid_hook_trigger")
+            .expect("hook trigger export missing");
         let section = &output[pos..];
         assert!(
             section.contains("get_json"),
@@ -1819,6 +1791,132 @@ mod tests {
         assert!(
             output.contains("let capsule_desc : Option < & str > = None"),
             "Capsule without doc should have None description, got:\n{output}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Component Model specific tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn generates_guest_impl_and_export_macro() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("do_thing")]
+                fn do_thing(&self, args: DoArgs) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("impl :: astrid_sdk :: astrid_sys :: Guest for __AstridExport"),
+            "Should generate impl Guest for __AstridExport, got:\n{output}"
+        );
+        assert!(
+            output.contains(":: astrid_sdk :: astrid_sys :: export !"),
+            "Should generate export!() call, got:\n{output}"
+        );
+        assert!(
+            output.contains("__AstridExport"),
+            "Should reference __AstridExport struct"
+        );
+    }
+
+    #[test]
+    fn no_extism_references() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("do_thing")]
+                fn do_thing(&self, args: DoArgs) -> Result<String, Error> {
+                    todo!()
+                }
+                #[astrid::install]
+                fn install(&self) -> Result<(), SysError> {
+                    todo!()
+                }
+                #[astrid::upgrade]
+                fn upgrade(&self, prev_version: &str) -> Result<(), SysError> {
+                    todo!()
+                }
+                #[astrid::run]
+                fn run(&self) -> Result<(), SysError> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            !output.contains("extism_pdk"),
+            "Should not contain any extism_pdk references, got:\n{output}"
+        );
+        assert!(
+            !output.contains("no_mangle"),
+            "Should not contain #[no_mangle] (Component Model uses trait impl), got:\n{output}"
+        );
+        assert!(
+            !output.contains("extern \"C\""),
+            "Should not contain extern \"C\" (Component Model uses trait impl), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn hook_trigger_returns_capsule_result() {
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::interceptor("my_hook")]
+                fn handle(&self, data: HookData) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("CapsuleResult"),
+            "astrid_hook_trigger should return CapsuleResult, got:\n{output}"
+        );
+        assert!(
+            output.contains("\"continue\""),
+            "Successful dispatch should return action: \"continue\", got:\n{output}"
+        );
+        assert!(
+            output.contains("\"error\""),
+            "Error paths should return action: \"error\", got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn all_four_guest_methods_always_present() {
+        let attr = quote::quote! {};
+        // Minimal capsule with only one tool - should still have all 4 exports
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("ping")]
+                fn ping(&self) -> Result<String, Error> {
+                    todo!()
+                }
+            }
+        };
+
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("fn astrid_hook_trigger"),
+            "Guest impl must have astrid_hook_trigger"
+        );
+        assert!(output.contains("fn run"), "Guest impl must have run");
+        assert!(
+            output.contains("fn astrid_install"),
+            "Guest impl must have astrid_install"
+        );
+        assert!(
+            output.contains("fn astrid_upgrade"),
+            "Guest impl must have astrid_upgrade"
         );
     }
 }
