@@ -151,18 +151,30 @@ pub mod ipc {
     // Note: AsRef<[u8]> was removed — the handle now wraps u64, not bytes.
     // Use `.id()` to get the u64 handle or `.as_bytes()` for a Vec<u8>.
 
+    /// Publish a UTF-8 string payload to an IPC topic.
+    ///
+    /// The IPC bus carries UTF-8 strings (WIT `string` type). For structured
+    /// data, use [`publish_json`] which handles serialization.
+    pub fn publish(topic: &str, payload: &str) -> Result<(), SysError> {
+        wit_ipc::ipc_publish(topic, payload).map_err(SysError::HostError)
+    }
+
+    /// Publish a JSON-serialized value to an IPC topic.
+    pub fn publish_json<T: Serialize>(topic: &str, payload: &T) -> Result<(), SysError> {
+        let json = serde_json::to_string(payload)?;
+        publish(topic, &json)
+    }
+
+    /// Backward-compatible alias for [`publish`].
+    ///
+    /// **Deprecated:** The IPC bus now carries UTF-8 strings. The `&[u8]`
+    /// parameters will be validated as UTF-8 at runtime. Prefer [`publish`]
+    /// with `&str` parameters for compile-time safety.
+    #[deprecated(note = "Use ipc::publish(&str, &str) for compile-time UTF-8 safety")]
     pub fn publish_bytes(topic: impl AsRef<[u8]>, payload: &[u8]) -> Result<(), SysError> {
         let topic_str = bytes_to_str(topic.as_ref())?;
         let payload_str = bytes_to_str(payload)?;
-        wit_ipc::ipc_publish(topic_str, payload_str).map_err(SysError::HostError)
-    }
-
-    pub fn publish_json<T: Serialize>(
-        topic: impl AsRef<[u8]>,
-        payload: &T,
-    ) -> Result<(), SysError> {
-        let bytes = serde_json::to_vec(payload)?;
-        publish_bytes(topic, &bytes)
+        publish(topic_str, payload_str)
     }
 
     /// Publish a MessagePack-encoded value to an IPC topic.
@@ -183,9 +195,8 @@ pub mod ipc {
     }
 
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.
-    pub fn subscribe(topic: impl AsRef<[u8]>) -> Result<SubscriptionHandle, SysError> {
-        let topic_str = bytes_to_str(topic.as_ref())?;
-        let handle_id = wit_ipc::ipc_subscribe(topic_str).map_err(SysError::HostError)?;
+    pub fn subscribe(topic: &str) -> Result<SubscriptionHandle, SysError> {
+        let handle_id = wit_ipc::ipc_subscribe(topic).map_err(SysError::HostError)?;
         Ok(SubscriptionHandle(handle_id))
     }
 
@@ -267,20 +278,26 @@ pub mod uplink {
     }
 
     /// Register a new uplink connection. Returns a typed [`UplinkId`].
-    pub fn register(
-        name: impl AsRef<[u8]>,
-        platform: impl AsRef<[u8]>,
-        profile: impl AsRef<[u8]>,
-    ) -> Result<UplinkId, SysError> {
-        let name_str = bytes_to_str(name.as_ref())?;
-        let platform_str = bytes_to_str(platform.as_ref())?;
-        let profile_str = bytes_to_str(profile.as_ref())?;
-        let id = wit_uplink::uplink_register(name_str, platform_str, profile_str)
-            .map_err(SysError::HostError)?;
+    pub fn register(name: &str, platform: &str, profile: &str) -> Result<UplinkId, SysError> {
+        let id =
+            wit_uplink::uplink_register(name, platform, profile).map_err(SysError::HostError)?;
         Ok(UplinkId(id))
     }
 
-    /// Send bytes to a user via an uplink.
+    /// Send a message to a user via an uplink.
+    ///
+    /// Returns `true` if sent, `false` if the message was dropped.
+    pub fn send(
+        uplink_id: &UplinkId,
+        platform_user_id: &str,
+        content: &str,
+    ) -> Result<bool, SysError> {
+        wit_uplink::uplink_send(&uplink_id.0, platform_user_id, content)
+            .map_err(SysError::HostError)
+    }
+
+    /// Backward-compatible alias for [`send`].
+    #[deprecated(note = "Use uplink::send(&str, &str, &str) for compile-time UTF-8 safety")]
     pub fn send_bytes(
         uplink_id: &UplinkId,
         platform_user_id: impl AsRef<[u8]>,
@@ -970,19 +987,13 @@ pub mod runtime {
     /// Reads from the well-known `ASTRID_SOCKET_PATH` config key that the
     /// kernel injects into every capsule at load time.
     pub fn socket_path() -> Result<String, SysError> {
-        let raw = crate::env::var(crate::env::CONFIG_SOCKET_PATH)?;
-        // var() returns config values directly (no JSON encoding with WIT).
-        // Use proper JSON parsing to handle escape sequences correctly.
-        let path = serde_json::from_str::<String>(raw.trim()).or_else(|_| {
-            // Fallback: if the value isn't valid JSON, use it raw.
-            if raw.is_empty() {
-                Err(SysError::ApiError(
-                    "ASTRID_SOCKET_PATH config key is empty".to_string(),
-                ))
-            } else {
-                Ok(raw)
-            }
-        })?;
+        let path = crate::env::var(crate::env::CONFIG_SOCKET_PATH)?;
+        // WIT get-config returns values directly (no JSON encoding).
+        if path.is_empty() {
+            return Err(SysError::ApiError(
+                "ASTRID_SOCKET_PATH config key is empty".to_string(),
+            ));
+        }
         // Reject paths with null bytes - they would silently truncate at the OS level.
         if path.contains('\0') {
             return Err(SysError::ApiError(
@@ -1452,13 +1463,13 @@ pub mod identity {
     ///
     /// - `method` describes how the link was established (e.g. "chat_command", "system").
     ///
-    /// Returns the created link on success. Requires `identity = ["link"]` or higher.
+    /// Requires `identity = ["link"]` or higher.
     pub fn link(
         platform: &str,
         platform_user_id: &str,
         astrid_user_id: &str,
         method: &str,
-    ) -> Result<Link, SysError> {
+    ) -> Result<(), SysError> {
         let request = wit_types::IdentityLinkRequest {
             platform: platform.to_string(),
             platform_user_id: platform_user_id.to_string(),
@@ -1471,15 +1482,7 @@ pub mod identity {
                 resp.error.unwrap_or_else(|| "identity link failed".into()),
             ));
         }
-        // The WIT identity-ok-response doesn't carry link details directly.
-        // Reconstruct the link from the request parameters since the host confirmed success.
-        Ok(Link {
-            platform: platform.to_string(),
-            platform_user_id: platform_user_id.to_string(),
-            astrid_user_id: astrid_user_id.to_string(),
-            linked_at: String::new(), // Not available from identity-ok-response
-            method: method.to_string(),
-        })
+        Ok(())
     }
 
     /// Unlink a platform identity from its Astrid user.

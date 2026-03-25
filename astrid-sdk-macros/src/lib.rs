@@ -649,7 +649,11 @@ fn capsule_impl(
         } else {
             quote! {
                 let instance = #struct_name::default();
-                let _ = instance.#method_name();
+                if let Err(e) = instance.#method_name() {
+                    ::astrid_sdk::prelude::log::error(
+                        &format!("install hook failed: {e:?}")
+                    );
+                }
             }
         }
     } else {
