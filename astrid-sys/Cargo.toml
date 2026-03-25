@@ -6,10 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Raw FFI bindings (Airlocks) for the Astrid OS Microkernel"
+description = "Component Model bindings (Airlocks) for the Astrid OS runtime"
 
 [dependencies]
-extism-pdk = "1.4"
+wit-bindgen = { version = "0.54", default-features = false, features = ["macros"] }
 
 [lints]
 workspace = true
