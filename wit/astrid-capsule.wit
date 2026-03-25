@@ -300,6 +300,12 @@ interface types {
         ok: bool,
         /// Error message, if the operation failed.
         error: option<string>,
+        /// Created user ID (set by create-user on success).
+        user-id: option<string>,
+        /// Whether a link was removed (set by unlink on success).
+        removed: option<bool>,
+        /// JSON-encoded list of platform links (set by list-links on success).
+        links-json: option<string>,
     }
 
     /// Request for user input during capsule lifecycle.

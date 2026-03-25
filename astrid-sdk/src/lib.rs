@@ -113,6 +113,15 @@ pub enum SysError {
     BorshError(#[from] std::io::Error),
     #[error("API logic error: {0}")]
     ApiError(String),
+    #[error("Invalid UTF-8: {0}")]
+    Utf8Error(#[from] std::string::FromUtf8Error),
+}
+
+/// Convert bytes to a UTF-8 string, returning an error instead of silently
+/// corrupting non-UTF-8 data. The Component Model WIT `string` type requires
+/// valid UTF-8 — lossy conversion would silently garble binary payloads.
+fn bytes_to_str(bytes: &[u8]) -> Result<&str, SysError> {
+    std::str::from_utf8(bytes).map_err(|e| SysError::ApiError(format!("invalid UTF-8: {e}")))
 }
 
 pub mod fs;
@@ -141,20 +150,13 @@ pub mod ipc {
         }
     }
 
-    // Allow existing code using `impl AsRef<[u8]>` to pass a SubscriptionHandle.
-    impl AsRef<[u8]> for SubscriptionHandle {
-        fn as_ref(&self) -> &[u8] {
-            // Note: this returns an empty slice since we can't return a reference to
-            // a temporary. Callers should use `.id()` or `.as_bytes()` instead.
-            // Kept for backwards compatibility of the trait impl.
-            &[]
-        }
-    }
+    // Note: AsRef<[u8]> was removed — the handle now wraps u64, not bytes.
+    // Use `.id()` to get the u64 handle or `.as_bytes()` for a Vec<u8>.
 
     pub fn publish_bytes(topic: impl AsRef<[u8]>, payload: &[u8]) -> Result<(), SysError> {
-        let topic_str = String::from_utf8_lossy(topic.as_ref());
-        let payload_str = String::from_utf8_lossy(payload);
-        wit_ipc::ipc_publish(&topic_str, &payload_str).map_err(SysError::HostError)
+        let topic_str = bytes_to_str(topic.as_ref())?;
+        let payload_str = bytes_to_str(payload)?;
+        wit_ipc::ipc_publish(topic_str, payload_str).map_err(SysError::HostError)
     }
 
     pub fn publish_json<T: Serialize>(
@@ -175,8 +177,8 @@ pub mod ipc {
 
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.
     pub fn subscribe(topic: impl AsRef<[u8]>) -> Result<SubscriptionHandle, SysError> {
-        let topic_str = String::from_utf8_lossy(topic.as_ref());
-        let handle_id = wit_ipc::ipc_subscribe(&topic_str).map_err(SysError::HostError)?;
+        let topic_str = bytes_to_str(topic.as_ref())?;
+        let handle_id = wit_ipc::ipc_subscribe(topic_str).map_err(SysError::HostError)?;
         Ok(SubscriptionHandle(handle_id))
     }
 
@@ -263,10 +265,10 @@ pub mod uplink {
         platform: impl AsRef<[u8]>,
         profile: impl AsRef<[u8]>,
     ) -> Result<UplinkId, SysError> {
-        let name_str = String::from_utf8_lossy(name.as_ref());
-        let platform_str = String::from_utf8_lossy(platform.as_ref());
-        let profile_str = String::from_utf8_lossy(profile.as_ref());
-        let id = wit_uplink::uplink_register(&name_str, &platform_str, &profile_str)
+        let name_str = bytes_to_str(name.as_ref())?;
+        let platform_str = bytes_to_str(platform.as_ref())?;
+        let profile_str = bytes_to_str(profile.as_ref())?;
+        let id = wit_uplink::uplink_register(name_str, platform_str, profile_str)
             .map_err(SysError::HostError)?;
         Ok(UplinkId(id))
     }
@@ -277,9 +279,9 @@ pub mod uplink {
         platform_user_id: impl AsRef<[u8]>,
         content: &[u8],
     ) -> Result<Vec<u8>, SysError> {
-        let platform_user_str = String::from_utf8_lossy(platform_user_id.as_ref());
-        let content_str = String::from_utf8_lossy(content);
-        let sent = wit_uplink::uplink_send(&uplink_id.0, &platform_user_str, &content_str)
+        let platform_user_str = bytes_to_str(platform_user_id.as_ref())?;
+        let content_str = bytes_to_str(content)?;
+        let sent = wit_uplink::uplink_send(&uplink_id.0, platform_user_str, content_str)
             .map_err(SysError::HostError)?;
         // Return a JSON-encoded boolean for backward compatibility.
         let result = serde_json::to_vec(&sent)?;
@@ -292,14 +294,14 @@ pub mod kv {
     use super::*;
 
     pub fn get_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let key_str = String::from_utf8_lossy(key.as_ref());
-        let result = wit_kv::kv_get(&key_str).map_err(SysError::HostError)?;
+        let key_str = bytes_to_str(key.as_ref())?;
+        let result = wit_kv::kv_get(key_str).map_err(SysError::HostError)?;
         Ok(result.unwrap_or_default())
     }
 
     pub fn set_bytes(key: impl AsRef<[u8]>, value: &[u8]) -> Result<(), SysError> {
-        let key_str = String::from_utf8_lossy(key.as_ref());
-        wit_kv::kv_set(&key_str, value).map_err(SysError::HostError)
+        let key_str = bytes_to_str(key.as_ref())?;
+        wit_kv::kv_set(key_str, value).map_err(SysError::HostError)
     }
 
     pub fn get_json<T: DeserializeOwned>(key: impl AsRef<[u8]>) -> Result<T, SysError> {
@@ -319,8 +321,8 @@ pub mod kv {
     /// The underlying store returns whether the key existed, but that
     /// information is not surfaced through the WASM host boundary.
     pub fn delete(key: impl AsRef<[u8]>) -> Result<(), SysError> {
-        let key_str = String::from_utf8_lossy(key.as_ref());
-        wit_kv::kv_delete(&key_str).map_err(SysError::HostError)
+        let key_str = bytes_to_str(key.as_ref())?;
+        wit_kv::kv_delete(key_str).map_err(SysError::HostError)
     }
 
     /// List all keys matching a prefix.
@@ -328,8 +330,8 @@ pub mod kv {
     /// Returns an empty vec if no keys match. The prefix is matched
     /// against key names within the capsule's scoped namespace.
     pub fn list_keys(prefix: impl AsRef<[u8]>) -> Result<Vec<String>, SysError> {
-        let prefix_str = String::from_utf8_lossy(prefix.as_ref());
-        wit_kv::kv_list_keys(&prefix_str).map_err(SysError::HostError)
+        let prefix_str = bytes_to_str(prefix.as_ref())?;
+        wit_kv::kv_list_keys(prefix_str).map_err(SysError::HostError)
     }
 
     /// Delete all keys matching a prefix.
@@ -337,8 +339,8 @@ pub mod kv {
     /// Returns the number of keys deleted. The prefix is matched
     /// against key names within the capsule's scoped namespace.
     pub fn clear_prefix(prefix: impl AsRef<[u8]>) -> Result<u64, SysError> {
-        let prefix_str = String::from_utf8_lossy(prefix.as_ref());
-        wit_kv::kv_clear_prefix(&prefix_str).map_err(SysError::HostError)
+        let prefix_str = bytes_to_str(prefix.as_ref())?;
+        wit_kv::kv_clear_prefix(prefix_str).map_err(SysError::HostError)
     }
 
     pub fn get_borsh<T: BorshDeserialize>(key: impl AsRef<[u8]>) -> Result<T, SysError> {
@@ -861,15 +863,15 @@ pub mod env {
 
     /// Read a config value as raw bytes. Like `std::env::var_os`.
     pub fn var_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let key_str = String::from_utf8_lossy(key.as_ref());
-        let result = wit_sys::get_config(&key_str).map_err(SysError::HostError)?;
+        let key_str = bytes_to_str(key.as_ref())?;
+        let result = wit_sys::get_config(key_str).map_err(SysError::HostError)?;
         Ok(result.into_bytes())
     }
 
     /// Read a config value as a UTF-8 string. Like `std::env::var`.
     pub fn var(key: impl AsRef<[u8]>) -> Result<String, SysError> {
-        let key_str = String::from_utf8_lossy(key.as_ref());
-        wit_sys::get_config(&key_str).map_err(SysError::HostError)
+        let key_str = bytes_to_str(key.as_ref())?;
+        wit_sys::get_config(key_str).map_err(SysError::HostError)
     }
 }
 
@@ -989,8 +991,8 @@ pub mod hooks {
     use super::*;
 
     pub fn trigger(event_bytes: &[u8]) -> Result<Vec<u8>, SysError> {
-        let request_json = String::from_utf8_lossy(event_bytes);
-        let result = wit_sys::trigger_hook(&request_json).map_err(SysError::HostError)?;
+        let request_json = bytes_to_str(event_bytes)?;
+        let result = wit_sys::trigger_hook(request_json).map_err(SysError::HostError)?;
         Ok(result.into_bytes())
     }
 }
@@ -1489,7 +1491,7 @@ pub mod identity {
                     .unwrap_or_else(|| "identity unlink failed".into()),
             ));
         }
-        Ok(resp.ok)
+        Ok(resp.removed.unwrap_or(false))
     }
 
     /// Create a new Astrid user.
@@ -1507,11 +1509,7 @@ pub mod identity {
                     .unwrap_or_else(|| "identity create_user failed".into()),
             ));
         }
-        // The WIT identity-ok-response doesn't carry user_id directly.
-        // The error field is repurposed to carry the user_id on success in the host impl.
-        // If error is None, we have no user_id to return — this is a limitation of the
-        // identity-ok-response type. The host should set error to the user_id on success.
-        resp.error
+        resp.user_id
             .ok_or_else(|| SysError::ApiError("missing user_id in response".into()))
     }
 
@@ -1530,10 +1528,8 @@ pub mod identity {
                     .unwrap_or_else(|| "identity list_links failed".into()),
             ));
         }
-        // The WIT identity-ok-response doesn't carry links directly.
-        // The host serializes links into the error field as JSON on success.
-        // Parse it if present, otherwise return empty.
-        if let Some(json_str) = &resp.error {
+        // Parse links from the links_json field.
+        if let Some(json_str) = &resp.links_json {
             #[derive(Deserialize)]
             struct LinkInfo {
                 platform: String,

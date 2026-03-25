@@ -631,8 +631,9 @@ fn capsule_impl(
             quote! {
                 // Install always starts from Default - there is no prior state.
                 let mut instance = #struct_name::default();
-                if let Err(e) = instance.#method_name() {
-                    let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
+                if let Err(_e) = instance.#method_name() {
+                    // Do NOT persist state on install failure — the capsule
+                    // should go through install again on next activation.
                     return;
                 }
                 let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
