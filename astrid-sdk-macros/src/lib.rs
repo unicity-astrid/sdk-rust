@@ -580,10 +580,18 @@ fn capsule_impl(
                     "description": capsule_desc.unwrap_or(""),
                 });
 
-                let data = ::serde_json::to_string(&response).ok();
+                let data = match ::serde_json::to_string(&response) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return ::astrid_sdk::astrid_sys::CapsuleResult {
+                            action: "error".into(),
+                            data: Some(format!("failed to serialize tool_describe: {e}")),
+                        };
+                    }
+                };
                 return ::astrid_sdk::astrid_sys::CapsuleResult {
                     action: "continue".into(),
-                    data,
+                    data: Some(data),
                 };
             }
         });

@@ -113,8 +113,6 @@ pub enum SysError {
     BorshError(#[from] std::io::Error),
     #[error("API logic error: {0}")]
     ApiError(String),
-    #[error("Invalid UTF-8: {0}")]
-    Utf8Error(#[from] std::string::FromUtf8Error),
 }
 
 /// Convert bytes to a UTF-8 string, returning an error instead of silently
@@ -167,12 +165,21 @@ pub mod ipc {
         publish_bytes(topic, &bytes)
     }
 
+    /// Publish a MessagePack-encoded value to an IPC topic.
+    ///
+    /// **Removed:** The IPC bus now carries UTF-8 strings (WIT `string`
+    /// type). MessagePack is binary and cannot be sent as a string payload.
+    /// Use [`publish_json`] instead.
+    #[deprecated(note = "IPC bus carries UTF-8 strings. Use publish_json instead.")]
     pub fn publish_msgpack<T: Serialize>(
-        topic: impl AsRef<[u8]>,
-        payload: &T,
+        _topic: impl AsRef<[u8]>,
+        _payload: &T,
     ) -> Result<(), SysError> {
-        let bytes = rmp_serde::to_vec_named(payload)?;
-        publish_bytes(topic, &bytes)
+        Err(SysError::ApiError(
+            "publish_msgpack is no longer supported: IPC bus carries UTF-8 strings. \
+             Use publish_json instead."
+                .into(),
+        ))
     }
 
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.

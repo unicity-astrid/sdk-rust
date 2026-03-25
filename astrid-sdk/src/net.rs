@@ -61,11 +61,20 @@ impl core::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// Bind a Unix Domain Socket to the given path and return a listener handle.
+/// Bind a Unix Domain Socket and return a listener handle.
+///
+/// The `path` argument is ignored — the kernel pre-provisions a single
+/// Unix socket per capsule. Use [`crate::runtime::socket_path()`] to
+/// discover the actual socket path.
+#[deprecated(note = "path argument is ignored; the kernel pre-binds the socket. \
+                      Use bind_unix_default() or pass any value.")]
 pub fn bind_unix(path: impl AsRef<[u8]>) -> Result<ListenerHandle, SysError> {
-    // The WIT net-bind-unix takes a u64 listener handle argument (ignored by the host,
-    // single pre-bound listener per capsule). We pass 0 as a placeholder.
-    let _ = path; // Path is not used in the WIT API; host uses the pre-provisioned socket.
+    let _ = path;
+    bind_unix_default()
+}
+
+/// Bind the kernel-provisioned Unix Domain Socket and return a listener handle.
+pub fn bind_unix_default() -> Result<ListenerHandle, SysError> {
     let handle = wit_net::net_bind_unix(0).map_err(SysError::HostError)?;
     Ok(ListenerHandle(handle))
 }
@@ -95,10 +104,10 @@ pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
             Ok(bytes) => return Ok(bytes),
             Err(TryRecvError::Closed) => return Err(RecvError),
             Err(TryRecvError::Empty) => {
-                // try_recv blocks in the host for up to 50ms per call, so this
-                // loop is not a true busy-wait. The sleep adds a small yield
-                // between host calls for good measure.
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                // The WIT net-read function is non-blocking. This is a polling
+                // loop — sleep between attempts to avoid spinning the CPU.
+                // 50ms balances responsiveness with CPU usage.
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
