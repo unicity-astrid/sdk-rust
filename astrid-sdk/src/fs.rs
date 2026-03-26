@@ -139,32 +139,32 @@ impl Iterator for ReadDir {
 // ---------------------------------------------------------------------------
 
 /// Check if a path exists. Like [`std::fs::exists`] (nightly).
-pub fn exists(path: impl AsRef<[u8]>) -> Result<bool, SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
+pub fn exists(path: &str) -> Result<bool, SysError> {
+    let path_str = path;
     wit_fs::fs_exists(path_str).map_err(SysError::HostError)
 }
 
 /// Read the entire contents of a file as bytes. Like [`std::fs::read`].
-pub fn read(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
+pub fn read(path: &str) -> Result<Vec<u8>, SysError> {
+    let path_str = path;
     wit_fs::read_file(path_str).map_err(SysError::HostError)
 }
 
 /// Read the entire contents of a file as a string. Like [`std::fs::read_to_string`].
-pub fn read_to_string(path: impl AsRef<[u8]>) -> Result<String, SysError> {
+pub fn read_to_string(path: &str) -> Result<String, SysError> {
     let bytes = read(path)?;
     String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))
 }
 
 /// Write bytes to a file. Like [`std::fs::write`].
-pub fn write(path: impl AsRef<[u8]>, contents: impl AsRef<[u8]>) -> Result<(), SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
-    wit_fs::write_file(path_str, contents.as_ref()).map_err(SysError::HostError)
+pub fn write(path: &str, contents: &[u8]) -> Result<(), SysError> {
+    let path_str = path;
+    wit_fs::write_file(path_str, contents).map_err(SysError::HostError)
 }
 
 /// Create a directory. Like [`std::fs::create_dir`].
-pub fn create_dir(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
+pub fn create_dir(path: &str) -> Result<(), SysError> {
+    let path_str = path;
     wit_fs::fs_mkdir(path_str).map_err(SysError::HostError)
 }
 
@@ -172,8 +172,8 @@ pub fn create_dir(path: impl AsRef<[u8]>) -> Result<(), SysError> {
 ///
 /// Returns an iterator over the entries in the directory. The host resolves
 /// all entries in a single call, so the iterator is fully materialized.
-pub fn read_dir(path: impl AsRef<[u8]>) -> Result<ReadDir, SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
+pub fn read_dir(path: &str) -> Result<ReadDir, SysError> {
+    let path_str = path;
     let names = wit_fs::fs_readdir(path_str).map_err(SysError::HostError)?;
     let parent = if path_str.ends_with('/') || path_str.is_empty() {
         path_str.to_string()
@@ -197,8 +197,8 @@ pub fn read_dir(path: impl AsRef<[u8]>) -> Result<ReadDir, SysError> {
 }
 
 /// Get file metadata. Like [`std::fs::metadata`].
-pub fn metadata(path: impl AsRef<[u8]>) -> Result<Metadata, SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
+pub fn metadata(path: &str) -> Result<Metadata, SysError> {
+    let path_str = path;
     let stat = wit_fs::fs_stat(path_str).map_err(SysError::HostError)?;
     Ok(Metadata {
         size: stat.size,
@@ -208,7 +208,7 @@ pub fn metadata(path: impl AsRef<[u8]>) -> Result<Metadata, SysError> {
 }
 
 /// Remove a file. Like [`std::fs::remove_file`].
-pub fn remove_file(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-    let path_str = crate::bytes_to_str(path.as_ref())?;
+pub fn remove_file(path: &str) -> Result<(), SysError> {
+    let path_str = path;
     wit_fs::fs_unlink(path_str).map_err(SysError::HostError)
 }

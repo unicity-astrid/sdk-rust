@@ -33,7 +33,7 @@
 //! | [`approval`]    | N/A              | Human approval for sensitive actions   |
 //! | [`types`]       | N/A              | IPC payload types and LLM schemas      |
 
-#![allow(unsafe_code)]
+#![forbid(unsafe_code)]
 #![allow(missing_docs)]
 #![deny(clippy::all)]
 #![deny(unreachable_pub)]
@@ -78,13 +78,15 @@ pub mod types {
         StopReason, StreamEvent, ToolCall, ToolCallResult, Usage,
     };
 
-    /// Identifies the user and session that triggered the current capsule execution.
+    /// Identifies the caller that triggered the current capsule execution.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct CallerContext {
-        /// Session ID, if available.
-        pub session_id: Option<String>,
-        /// User ID, if available.
-        pub user_id: Option<String>,
+        /// UUID of the capsule that originated the IPC message.
+        pub source_id: String,
+        /// The acting principal (user ID), if available.
+        pub principal: Option<String>,
+        /// ISO 8601 timestamp of the originating message.
+        pub timestamp: String,
     }
 }
 pub use borsh;
@@ -317,24 +319,24 @@ pub mod uplink {
 pub mod kv {
     use super::*;
 
-    pub fn get_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let key_str = bytes_to_str(key.as_ref())?;
+    pub fn get_bytes(key: &str) -> Result<Vec<u8>, SysError> {
+        let key_str = key;
         let result = wit_kv::kv_get(key_str).map_err(SysError::HostError)?;
         Ok(result.unwrap_or_default())
     }
 
-    pub fn set_bytes(key: impl AsRef<[u8]>, value: &[u8]) -> Result<(), SysError> {
-        let key_str = bytes_to_str(key.as_ref())?;
+    pub fn set_bytes(key: &str, value: &[u8]) -> Result<(), SysError> {
+        let key_str = key;
         wit_kv::kv_set(key_str, value).map_err(SysError::HostError)
     }
 
-    pub fn get_json<T: DeserializeOwned>(key: impl AsRef<[u8]>) -> Result<T, SysError> {
+    pub fn get_json<T: DeserializeOwned>(key: &str) -> Result<T, SysError> {
         let bytes = get_bytes(key)?;
         let parsed = serde_json::from_slice(&bytes)?;
         Ok(parsed)
     }
 
-    pub fn set_json<T: Serialize>(key: impl AsRef<[u8]>, value: &T) -> Result<(), SysError> {
+    pub fn set_json<T: Serialize>(key: &str, value: &T) -> Result<(), SysError> {
         let bytes = serde_json::to_vec(value)?;
         set_bytes(key, &bytes)
     }
@@ -344,8 +346,8 @@ pub mod kv {
     /// This is idempotent: deleting a non-existent key succeeds silently.
     /// The underlying store returns whether the key existed, but that
     /// information is not surfaced through the WASM host boundary.
-    pub fn delete(key: impl AsRef<[u8]>) -> Result<(), SysError> {
-        let key_str = bytes_to_str(key.as_ref())?;
+    pub fn delete(key: &str) -> Result<(), SysError> {
+        let key_str = key;
         wit_kv::kv_delete(key_str).map_err(SysError::HostError)
     }
 
@@ -353,8 +355,8 @@ pub mod kv {
     ///
     /// Returns an empty vec if no keys match. The prefix is matched
     /// against key names within the capsule's scoped namespace.
-    pub fn list_keys(prefix: impl AsRef<[u8]>) -> Result<Vec<String>, SysError> {
-        let prefix_str = bytes_to_str(prefix.as_ref())?;
+    pub fn list_keys(prefix: &str) -> Result<Vec<String>, SysError> {
+        let prefix_str = prefix;
         wit_kv::kv_list_keys(prefix_str).map_err(SysError::HostError)
     }
 
@@ -362,18 +364,18 @@ pub mod kv {
     ///
     /// Returns the number of keys deleted. The prefix is matched
     /// against key names within the capsule's scoped namespace.
-    pub fn clear_prefix(prefix: impl AsRef<[u8]>) -> Result<u64, SysError> {
-        let prefix_str = bytes_to_str(prefix.as_ref())?;
+    pub fn clear_prefix(prefix: &str) -> Result<u64, SysError> {
+        let prefix_str = prefix;
         wit_kv::kv_clear_prefix(prefix_str).map_err(SysError::HostError)
     }
 
-    pub fn get_borsh<T: BorshDeserialize>(key: impl AsRef<[u8]>) -> Result<T, SysError> {
+    pub fn get_borsh<T: BorshDeserialize>(key: &str) -> Result<T, SysError> {
         let bytes = get_bytes(key)?;
         let parsed = borsh::from_slice(&bytes)?;
         Ok(parsed)
     }
 
-    pub fn set_borsh<T: BorshSerialize>(key: impl AsRef<[u8]>, value: &T) -> Result<(), SysError> {
+    pub fn set_borsh<T: BorshSerialize>(key: &str, value: &T) -> Result<(), SysError> {
         let bytes = borsh::to_vec(value)?;
         set_bytes(key, &bytes)
     }
@@ -414,11 +416,7 @@ pub mod kv {
     ///
     /// The stored JSON looks like `{"__sv": 1, "data": { ... }}`.
     /// Use [`get_versioned`] or [`get_versioned_or_migrate`] to read it back.
-    pub fn set_versioned<T: Serialize>(
-        key: impl AsRef<[u8]>,
-        value: &T,
-        version: u32,
-    ) -> Result<(), SysError> {
+    pub fn set_versioned<T: Serialize>(key: &str, value: &T, version: u32) -> Result<(), SysError> {
         let envelope = VersionedEnvelope {
             schema_version: version,
             data: value,
@@ -437,10 +435,10 @@ pub mod kv {
     /// Data written by plain [`set_json`] (no envelope) returns
     /// [`Versioned::Unversioned`].
     pub fn get_versioned<T: DeserializeOwned>(
-        key: impl AsRef<[u8]>,
+        key: &str,
         current_version: u32,
     ) -> Result<Versioned<T>, SysError> {
-        let bytes = get_bytes(&key)?;
+        let bytes = get_bytes(key)?;
         parse_versioned(&bytes, current_version)
     }
 
@@ -520,12 +518,10 @@ pub mod kv {
     /// For [`Versioned::Unversioned`] data, `migrate_fn` is called with
     /// version 0. For [`Versioned::NotFound`], returns `None`.
     pub fn get_versioned_or_migrate<T: Serialize + DeserializeOwned>(
-        key: impl AsRef<[u8]>,
+        key: &str,
         current_version: u32,
         migrate_fn: impl FnOnce(serde_json::Value, u32) -> Result<T, SysError>,
     ) -> Result<Option<T>, SysError> {
-        let key = key.as_ref();
-
         match get_versioned::<T>(key, current_version)? {
             Versioned::Current(data) => Ok(Some(data)),
             Versioned::NeedsMigration {
@@ -884,15 +880,15 @@ pub mod env {
     pub const CONFIG_SOCKET_PATH: &str = "ASTRID_SOCKET_PATH";
 
     /// Read a config value as raw bytes. Like `std::env::var_os`.
-    pub fn var_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let key_str = bytes_to_str(key.as_ref())?;
+    pub fn var_bytes(key: &str) -> Result<Vec<u8>, SysError> {
+        let key_str = key;
         let result = wit_sys::get_config(key_str).map_err(SysError::HostError)?;
         Ok(result.into_bytes())
     }
 
     /// Read a config value as a UTF-8 string. Like `std::env::var`.
-    pub fn var(key: impl AsRef<[u8]>) -> Result<String, SysError> {
-        let key_str = bytes_to_str(key.as_ref())?;
+    pub fn var(key: &str) -> Result<String, SysError> {
+        let key_str = key;
         wit_sys::get_config(key_str).map_err(SysError::HostError)
     }
 }
@@ -975,8 +971,9 @@ pub mod runtime {
     pub fn caller() -> Result<crate::types::CallerContext, SysError> {
         let ctx = wit_sys::get_caller().map_err(SysError::HostError)?;
         Ok(crate::types::CallerContext {
-            session_id: Some(ctx.source_id),
-            user_id: ctx.principal,
+            source_id: ctx.source_id,
+            principal: ctx.principal,
+            timestamp: ctx.timestamp,
         })
     }
 

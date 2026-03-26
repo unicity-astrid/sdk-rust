@@ -295,7 +295,7 @@ fn capsule_impl(
                             Ok(state) => state,
                             Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
                             Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(format!("failed to load state: {}", e)),
                             },
                         };
@@ -305,20 +305,20 @@ fn capsule_impl(
                         })() {
                             Ok(val) => val,
                             Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(e),
                             },
                         };
                         if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
                             return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(format!("failed to save state: {}", e)),
                             };
                         }
                         let res_json = match ::serde_json::to_string(&result) {
                             Ok(s) => s,
                             Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(format!("failed to serialize result: {}", e)),
                             },
                         };
@@ -343,14 +343,14 @@ fn capsule_impl(
                         })() {
                             Ok(val) => val,
                             Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(e),
                             },
                         };
                         let res_json = match ::serde_json::to_string(&result) {
                             Ok(s) => s,
                             Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(format!("failed to serialize result: {}", e)),
                             },
                         };
@@ -461,7 +461,7 @@ fn capsule_impl(
                         let tool_req: __AstridToolExecPayload = match ::serde_json::from_slice(&payload) {
                             Ok(r) => r,
                             Err(e) => return ::astrid_sdk::astrid_sys::CapsuleResult {
-                                action: "error".into(),
+                                action: "deny".into(),
                                 data: Some(format!("failed to parse tool execute payload: {}", e)),
                             },
                         };
@@ -586,7 +586,7 @@ fn capsule_impl(
                     Ok(s) => s,
                     Err(e) => {
                         return ::astrid_sdk::astrid_sys::CapsuleResult {
-                            action: "error".into(),
+                            action: "deny".into(),
                             data: Some(format!("failed to serialize tool_describe: {e}")),
                         };
                     }
@@ -619,7 +619,7 @@ fn capsule_impl(
     let hook_trigger_body = if hook_arms.is_empty() {
         quote! {
             ::astrid_sdk::astrid_sys::CapsuleResult {
-                action: "error".into(),
+                action: "deny".into(),
                 data: Some(format!("unknown hook action: {}", action)),
             }
         }
@@ -628,7 +628,7 @@ fn capsule_impl(
             match action.as_str() {
                 #( #hook_arms )*
                 _ => ::astrid_sdk::astrid_sys::CapsuleResult {
-                    action: "error".into(),
+                    action: "deny".into(),
                     data: Some(format!("unknown hook action: {}", action)),
                 },
             }
@@ -641,12 +641,20 @@ fn capsule_impl(
             quote! {
                 // Install always starts from Default - there is no prior state.
                 let mut instance = #struct_name::default();
-                if let Err(_e) = instance.#method_name() {
+                if let Err(e) = instance.#method_name() {
                     // Do NOT persist state on install failure — the capsule
                     // should go through install again on next activation.
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("install hook failed: {e:?}")
+                    );
                     return;
                 }
-                let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
+                if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("install: failed to persist state: {e}")
+                    );
+                    return;
+                }
             }
         } else {
             quote! {
@@ -682,8 +690,18 @@ fn capsule_impl(
                 // Read prev_version from capsule config (set by kernel before upgrade).
                 let prev_version = ::astrid_sdk::prelude::env::var("prev_version")
                     .unwrap_or_default();
-                let _ = instance.#method_name(&prev_version);
-                let _ = ::astrid_sdk::prelude::kv::set_json("__state", &instance);
+                if let Err(e) = instance.#method_name(&prev_version) {
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("upgrade hook failed: {e:?}")
+                    );
+                    return;
+                }
+                if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("upgrade: failed to persist state: {e}")
+                    );
+                    return;
+                }
             }
         } else {
             quote! {
@@ -714,11 +732,19 @@ fn capsule_impl(
                         return;
                     }
                 };
-                let _ = instance.#method_name();
+                if let Err(e) = instance.#method_name() {
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("run loop exited with error: {e:?}")
+                    );
+                }
             }
         } else {
             quote! {
-                let _ = get_instance().#method_name();
+                if let Err(e) = get_instance().#method_name() {
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("run loop exited with error: {e:?}")
+                    );
+                }
             }
         }
     } else {
@@ -1901,8 +1927,8 @@ mod tests {
             "Successful dispatch should return action: \"continue\", got:\n{output}"
         );
         assert!(
-            output.contains("\"error\""),
-            "Error paths should return action: \"error\", got:\n{output}"
+            output.contains("\"deny\""),
+            "Error paths should return action: \"deny\" to halt the interceptor chain, got:\n{output}"
         );
     }
 
