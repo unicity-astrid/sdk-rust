@@ -476,7 +476,11 @@ fn capsule_impl(
                             Ok(s) => (s, false),
                             Err(e) => (format!("{}", e), true),
                         };
-                        #state_teardown
+                        // Only persist state on success — partial mutations from
+                        // a failed tool call should not be saved.
+                        if !result_str.1 {
+                            #state_teardown
+                        }
                         let ipc_result = ::serde_json::json!({
                             "type": "tool_execute_result",
                             "call_id": call_id.clone(),
@@ -709,7 +713,11 @@ fn capsule_impl(
                 // Read prev_version from capsule config (set by kernel before upgrade).
                 let prev_version = ::astrid_sdk::prelude::env::var("prev_version")
                     .unwrap_or_default();
-                let _ = instance.#method_name(&prev_version);
+                if let Err(e) = instance.#method_name(&prev_version) {
+                    let _ = ::astrid_sdk::prelude::log::error(
+                        &format!("upgrade hook failed: {e:?}")
+                    );
+                }
             }
         }
     } else {
