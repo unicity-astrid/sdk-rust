@@ -23,6 +23,12 @@ mod generated {
         world: "capsule",
         path: "../wit",
         pub_export_macro: true,
+        generate_unused_types: true,
+        additional_derives: [
+            serde::Serialize,
+            serde::Deserialize,
+            PartialEq,
+        ],
     });
 }
 
