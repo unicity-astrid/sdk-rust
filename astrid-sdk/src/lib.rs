@@ -719,17 +719,30 @@ pub mod http {
     }
 
     /// An HTTP response from a non-streaming request.
+    ///
+    /// All fields are private — use accessor methods to read them.
     #[derive(Debug)]
     pub struct Response {
-        /// HTTP status code (e.g. 200, 404, 500).
-        pub status: u16,
-        /// Response headers.
-        pub headers: HashMap<String, String>,
+        status: u16,
+        headers: HashMap<String, String>,
         body: Vec<u8>,
     }
 
     impl Response {
+        /// HTTP status code (e.g. 200, 404, 500).
+        #[must_use]
+        pub fn status(&self) -> u16 {
+            self.status
+        }
+
+        /// Response headers.
+        #[must_use]
+        pub fn headers(&self) -> &HashMap<String, String> {
+            &self.headers
+        }
+
         /// The raw response body as bytes.
+        #[must_use]
         pub fn bytes(&self) -> &[u8] {
             &self.body
         }
@@ -745,6 +758,7 @@ pub mod http {
         }
 
         /// Whether the status code indicates success (2xx).
+        #[must_use]
         pub fn is_success(&self) -> bool {
             (200..300).contains(&self.status)
         }
@@ -771,7 +785,15 @@ pub mod http {
     /// Must be explicitly closed via [`stream_close`] when done.
     /// Not `Clone` — each handle is a unique owner of the host-side resource.
     #[derive(Debug)]
-    pub struct HttpStreamHandle(u64);
+    pub struct HttpStreamHandle(pub(crate) u64);
+
+    impl HttpStreamHandle {
+        /// Raw handle ID for interop with lower-level APIs.
+        #[must_use]
+        pub fn id(&self) -> u64 {
+            self.0
+        }
+    }
 
     /// Metadata returned when a streaming HTTP request is initiated.
     pub struct StreamStartResponse {
@@ -868,43 +890,35 @@ pub mod time {
 }
 
 /// Structured logging — mirrors the [`log`](https://docs.rs/log) crate conventions.
+///
+/// All functions are infallible — the host `log()` call cannot fail.
 pub mod log {
     use super::*;
     use core::fmt::Display;
 
-    /// Log a message at the given level.
-    pub fn log(level: &str, message: impl Display) -> Result<(), SysError> {
-        let msg = format!("{message}");
-        let wit_level = match level {
-            "trace" => wit_types::LogLevel::Trace,
-            "debug" => wit_types::LogLevel::Debug,
-            "info" => wit_types::LogLevel::Info,
-            "warn" => wit_types::LogLevel::Warn,
-            "error" => wit_types::LogLevel::Error,
-            _ => wit_types::LogLevel::Info,
-        };
-        wit_sys::log(wit_level, &msg);
-        Ok(())
+    /// Log at TRACE level.
+    pub fn trace(message: impl Display) {
+        wit_sys::log(wit_types::LogLevel::Trace, &format!("{message}"));
     }
 
     /// Log at DEBUG level.
-    pub fn debug(message: impl Display) -> Result<(), SysError> {
-        log("debug", message)
+    pub fn debug(message: impl Display) {
+        wit_sys::log(wit_types::LogLevel::Debug, &format!("{message}"));
     }
 
     /// Log at INFO level.
-    pub fn info(message: impl Display) -> Result<(), SysError> {
-        log("info", message)
+    pub fn info(message: impl Display) {
+        wit_sys::log(wit_types::LogLevel::Info, &format!("{message}"));
     }
 
     /// Log at WARN level.
-    pub fn warn(message: impl Display) -> Result<(), SysError> {
-        log("warn", message)
+    pub fn warn(message: impl Display) {
+        wit_sys::log(wit_types::LogLevel::Warn, &format!("{message}"));
     }
 
     /// Log at ERROR level.
-    pub fn error(message: impl Display) -> Result<(), SysError> {
-        log("error", message)
+    pub fn error(message: impl Display) {
+        wit_sys::log(wit_types::LogLevel::Error, &format!("{message}"));
     }
 }
 
@@ -1022,7 +1036,7 @@ pub mod process {
     #[derive(Debug, Deserialize)]
     pub struct BackgroundProcessHandle {
         /// Opaque handle ID (not an OS PID).
-        id: u64,
+        pub(crate) id: u64,
     }
 
     impl BackgroundProcessHandle {
@@ -1320,8 +1334,12 @@ pub mod interceptors {
 /// ```ignore
 /// use astrid_sdk::prelude::*;
 ///
-/// let result = approval::request("git push", "git push origin main", "high")?;
-/// if !result.approved {
+/// let result = approval::request(
+///     "git push",
+///     "git push origin main",
+///     approval::RiskLevel::High,
+/// )?;
+/// if !result.was_approved() {
 ///     return Err(SysError::ApiError("Action denied by user".into()));
 /// }
 /// ```
@@ -1499,14 +1517,72 @@ pub mod identity {
 pub mod approval {
     use super::*;
 
+    /// Risk classification for an approval request.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RiskLevel {
+        Low,
+        Medium,
+        High,
+        Critical,
+    }
+
+    impl RiskLevel {
+        /// Convert to the wire-format string expected by the WIT interface.
+        fn as_str(&self) -> &'static str {
+            match self {
+                Self::Low => "low",
+                Self::Medium => "medium",
+                Self::High => "high",
+                Self::Critical => "critical",
+            }
+        }
+    }
+
+    /// The decision made by the user or allowance store.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ApprovalDecision {
+        /// Approved for this single invocation.
+        Approved,
+        /// Approved for the remainder of this session.
+        ApprovedSession,
+        /// Approved permanently (stored as an allowance).
+        ApprovedAlways,
+        /// Denied by the user.
+        Denied,
+        /// Auto-approved via an existing allowance (no user prompt).
+        Allowance,
+    }
+
+    impl ApprovalDecision {
+        /// Parse from the wire-format string returned by the WIT interface.
+        fn from_wire(s: &str) -> Self {
+            match s {
+                "approve" => Self::Approved,
+                "approve_session" => Self::ApprovedSession,
+                "approve_always" => Self::ApprovedAlways,
+                "deny" => Self::Denied,
+                "allowance" => Self::Allowance,
+                // Defensive: treat unknown decisions as denied (fail-closed).
+                _ => Self::Denied,
+            }
+        }
+    }
+
     /// The result of an approval request.
     #[derive(Debug)]
     pub struct ApprovalResult {
         /// Whether the action was approved.
         pub approved: bool,
-        /// The decision string: "approve", "approve_session",
-        /// "approve_always", "deny", or "allowance" (auto-approved).
-        pub decision: String,
+        /// The typed decision.
+        pub decision: ApprovalDecision,
+    }
+
+    impl ApprovalResult {
+        /// Whether the action was approved (convenience alias for `self.approved`).
+        #[must_use]
+        pub fn was_approved(&self) -> bool {
+            self.approved
+        }
     }
 
     /// Request human approval for a sensitive action.
@@ -1517,21 +1593,21 @@ pub mod approval {
     ///
     /// - `action` - short description of the action (e.g. "git push")
     /// - `resource` - full resource identifier (e.g. "git push origin main")
-    /// - `risk_level` - one of "low", "medium", "high", "critical"
+    /// - `risk_level` - severity classification for the action
     pub fn request(
         action: &str,
         resource: &str,
-        risk_level: &str,
+        risk_level: RiskLevel,
     ) -> Result<ApprovalResult, SysError> {
         let req = wit_types::ApprovalRequest {
             action: action.to_string(),
             target_resource: resource.to_string(),
-            risk_level: risk_level.to_string(),
+            risk_level: risk_level.as_str().to_string(),
         };
         let resp = wit_approval::request_approval(&req).map_err(SysError::HostError)?;
         Ok(ApprovalResult {
             approved: resp.approved,
-            decision: resp.decision,
+            decision: ApprovalDecision::from_wire(&resp.decision),
         })
     }
 }

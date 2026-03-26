@@ -4,9 +4,25 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct ListenerHandle(pub(crate) u64);
 
+impl ListenerHandle {
+    /// Raw handle ID for interop with lower-level APIs.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Represents an open network stream.
 #[derive(Debug, Clone)]
 pub struct StreamHandle(pub(crate) u64);
+
+impl StreamHandle {
+    /// Raw handle ID for interop with lower-level APIs.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
 
 /// Error returned by [`recv`] when the stream is closed.
 ///
