@@ -27,34 +27,20 @@ use syn::{ImplItem, ItemImpl};
 /// and `Deserialize`. Field-level `///` doc comments from the WIT source
 /// are preserved as Rust doc comments.
 ///
+/// Accepts a single `.wit` file or a directory of `.wit` files (for
+/// multi-file packages).
+///
 /// # Example
 ///
-/// Given `wit/events.wit`:
-/// ```wit
-/// package my:capsule-events@1.0.0;
-/// interface events {
-///     /// A thing that happened.
-///     record my-event {
-///         /// Unique ID.
-///         id: string,
-///         /// Event count.
-///         count: u32,
-///         /// Optional label.
-///         label: option<string>,
-///     }
-/// }
-/// ```
-///
-/// In your capsule's `lib.rs`:
 /// ```rust,ignore
+/// // Single file:
 /// astrid_sdk::wit_events!("wit/events.wit");
 ///
+/// // Directory (multi-file package):
+/// astrid_sdk::wit_events!("wit/events/");
+///
 /// // Now available:
-/// let event = MyEvent {
-///     id: "abc".into(),
-///     count: 42,
-///     label: None,
-/// };
+/// let event = MyEvent { id: "abc".into(), count: 42, label: None };
 /// ipc::publish_json("my.v1.event", &event)?;
 /// ```
 #[proc_macro]
@@ -78,7 +64,7 @@ fn wit_events_inner(input: proc_macro2::TokenStream) -> syn::Result<proc_macro2:
     if !wit_path.exists() {
         return Err(syn::Error::new(
             lit.span(),
-            format!("WIT file not found: {}", wit_path.display()),
+            format!("WIT file or directory not found: {}", wit_path.display()),
         ));
     }
 

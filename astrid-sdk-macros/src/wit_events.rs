@@ -4,34 +4,52 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use wit_parser::{Resolve, Type, TypeDefKind};
 
-/// Parse a WIT file and generate Rust struct/enum definitions for all types.
+/// Parse a WIT file or directory and generate Rust type definitions.
 ///
-/// Also emits a hidden `include_str!` so Cargo rebuilds when the WIT file changes.
+/// Supports both single `.wit` files and directories containing multiple `.wit`
+/// files (uses `push_dir` for proper multi-file package handling).
+///
+/// Also emits hidden `include_str!` constants so Cargo rebuilds when WIT changes.
 pub(crate) fn generate(
     wit_path: &std::path::Path,
     span: proc_macro2::Span,
 ) -> syn::Result<TokenStream> {
-    let contents = std::fs::read_to_string(wit_path).map_err(|e| {
-        syn::Error::new(
-            span,
-            format!("failed to read WIT file '{}': {e}", wit_path.display()),
-        )
-    })?;
-
     let mut resolve = Resolve::default();
-    resolve
-        .push_str(wit_path.display().to_string(), &contents)
-        .map_err(|e| syn::Error::new(span, format!("failed to parse WIT: {e}")))?;
-
     let mut output = TokenStream::new();
 
-    // Emit include_str! so Cargo tracks the WIT file for incremental rebuilds.
-    let wit_path_str = wit_path
-        .to_str()
-        .ok_or_else(|| syn::Error::new(span, "WIT path is not valid UTF-8"))?;
-    output.extend(quote! {
-        const _: &str = include_str!(#wit_path_str);
-    });
+    if wit_path.is_dir() {
+        // Directory: parse all .wit files as a package.
+        resolve
+            .push_dir(wit_path)
+            .map_err(|e| syn::Error::new(span, format!("failed to parse WIT directory: {e}")))?;
+
+        // Emit include_str! for each .wit file so Cargo tracks them.
+        if let Ok(entries) = std::fs::read_dir(wit_path) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("wit") {
+                    if let Some(p) = path.to_str() {
+                        output.extend(quote! { const _: &str = include_str!(#p); });
+                    }
+                }
+            }
+        }
+    } else {
+        // Single file.
+        let contents = std::fs::read_to_string(wit_path).map_err(|e| {
+            syn::Error::new(
+                span,
+                format!("failed to read WIT file '{}': {e}", wit_path.display()),
+            )
+        })?;
+        resolve
+            .push_str(wit_path.display().to_string(), &contents)
+            .map_err(|e| syn::Error::new(span, format!("failed to parse WIT: {e}")))?;
+
+        if let Some(p) = wit_path.to_str() {
+            output.extend(quote! { const _: &str = include_str!(#p); });
+        }
+    }
 
     for (_, type_def) in &resolve.types {
         let Some(ref name) = type_def.name else {
@@ -65,14 +83,8 @@ pub(crate) fn generate(
                     .iter()
                     .map(|case| {
                         let variant_name = format_ident!("{}", kebab_to_pascal(&case.name));
-                        let case_doc = case
-                            .docs
-                            .contents
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|d| !d.is_empty());
-                        let case_doc_attr = case_doc.map(|d| quote! { #[doc = #d] });
-                        quote! { #case_doc_attr #variant_name, }
+                        let case_doc = case_doc_attr(&case.docs);
+                        quote! { #case_doc #variant_name, }
                     })
                     .collect();
                 output.extend(quote! {
@@ -86,21 +98,14 @@ pub(crate) fn generate(
             }
             TypeDefKind::Flags(flags_def) => {
                 // WIT flags are bitmasks — multiple can be set simultaneously.
-                // Generate an enum for the individual flag values and a type alias
-                // for Vec<FlagName> so serde serializes as a JSON array of strings.
+                // Generate an enum for individual values + Vec alias for the set.
                 let variants: Vec<TokenStream> = flags_def
                     .flags
                     .iter()
                     .map(|flag| {
                         let variant_name = format_ident!("{}", kebab_to_pascal(&flag.name));
-                        let flag_doc = flag
-                            .docs
-                            .contents
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|d| !d.is_empty());
-                        let flag_doc_attr = flag_doc.map(|d| quote! { #[doc = #d] });
-                        quote! { #flag_doc_attr #variant_name, }
+                        let flag_doc = case_doc_attr(&flag.docs);
+                        quote! { #flag_doc #variant_name, }
                     })
                     .collect();
                 let flag_enum_name = format_ident!("{}Flag", kebab_to_pascal(name));
@@ -116,12 +121,46 @@ pub(crate) fn generate(
                     pub type #rust_name = Vec<#flag_enum_name>;
                 });
             }
-            // Skip types we don't codegen (resources, handles, variants, etc.).
+            TypeDefKind::Variant(variant) => {
+                // WIT variants map to adjacently-tagged Rust enums.
+                let cases: Vec<TokenStream> = variant
+                    .cases
+                    .iter()
+                    .map(|case| {
+                        let variant_name = format_ident!("{}", kebab_to_pascal(&case.name));
+                        let case_doc = case_doc_attr(&case.docs);
+                        if let Some(ref ty) = case.ty {
+                            let (rust_ty, _) = wit_type_to_rust(&resolve, ty);
+                            quote! { #case_doc #variant_name(#rust_ty), }
+                        } else {
+                            quote! { #case_doc #variant_name, }
+                        }
+                    })
+                    .collect();
+                output.extend(quote! {
+                    #doc_attr
+                    #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+                    #[serde(tag = "tag", content = "value", rename_all = "kebab-case")]
+                    pub enum #rust_name {
+                        #(#cases)*
+                    }
+                });
+            }
+            // Skip types we don't codegen (resources, handles, type aliases, etc.).
             _ => {}
         }
     }
 
     Ok(output)
+}
+
+/// Extract doc comment from a WIT Docs object as a `#[doc = "..."]` attribute.
+fn case_doc_attr(docs: &wit_parser::Docs) -> Option<TokenStream> {
+    docs.contents
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| quote! { #[doc = #d] })
 }
 
 /// Generate field definitions for a WIT record.
@@ -133,13 +172,7 @@ fn record_fields(resolve: &Resolve, record: &wit_parser::Record) -> Vec<TokenStr
             let field_name = format_ident!("{}", kebab_to_snake(&field.name));
             let (ty, is_optional) = wit_type_to_rust(resolve, &field.ty);
 
-            let doc = field
-                .docs
-                .contents
-                .as_deref()
-                .map(str::trim)
-                .filter(|d| !d.is_empty());
-            let doc_attr = doc.map(|d| quote! { #[doc = #d] });
+            let doc_attr = case_doc_attr(&field.docs);
 
             if is_optional {
                 quote! {
@@ -175,9 +208,8 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
         Type::F32 => (quote! { f32 }, false),
         Type::F64 => (quote! { f64 }, false),
         Type::Char => (quote! { char }, false),
-        Type::String => (quote! { String }, false),
         // ErrorContext is an async resource handle — not meaningful in IPC events.
-        Type::ErrorContext => (quote! { String }, false),
+        Type::String | Type::ErrorContext => (quote! { String }, false),
         Type::Id(id) => {
             let type_def = &resolve.types[*id];
             match &type_def.kind {
@@ -203,7 +235,7 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
                     (quote! { (#(#types),*) }, false)
                 }
                 TypeDefKind::Type(inner) => wit_type_to_rust(resolve, inner),
-                TypeDefKind::Record(_) | TypeDefKind::Enum(_) => {
+                TypeDefKind::Record(_) | TypeDefKind::Enum(_) | TypeDefKind::Variant(_) => {
                     let name = type_def.name.as_deref().unwrap_or("Unknown");
                     let ident = format_ident!("{}", kebab_to_pascal(name));
                     (quote! { #ident }, false)
@@ -214,7 +246,7 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
                     let ident = format_ident!("{}", kebab_to_pascal(name));
                     (quote! { #ident }, false)
                 }
-                // Fallback for unsupported types (variant, resource, handle, etc.).
+                // Fallback for unsupported types (resource, handle, future, stream).
                 _ => (quote! { ::serde_json::Value }, false),
             }
         }
