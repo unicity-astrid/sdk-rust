@@ -1535,10 +1535,6 @@ pub mod approval {
         let req = wit_types::ApprovalRequest {
             action: action.to_string(),
             target_resource: resource.to_string(),
-            // Risk level is classified by the kernel, not the capsule.
-            // The WIT field is retained for backward compat but the kernel
-            // overrides it via SecurityPolicy.
-            risk_level: String::new(),
         };
         let resp = wit_approval::request_approval(&req).map_err(SysError::HostError)?;
         Ok(resp.approved)
