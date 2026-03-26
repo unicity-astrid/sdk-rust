@@ -1334,12 +1334,7 @@ pub mod interceptors {
 /// ```ignore
 /// use astrid_sdk::prelude::*;
 ///
-/// let result = approval::request(
-///     "git push",
-///     "git push origin main",
-///     approval::RiskLevel::High,
-/// )?;
-/// if !result.was_approved() {
+/// if !approval::request("git push", "git push origin main")? {
 ///     return Err(SysError::ApiError("Action denied by user".into()));
 /// }
 /// ```
@@ -1514,76 +1509,13 @@ pub mod identity {
     }
 }
 
+/// Human-in-the-loop approval for sensitive actions.
+///
+/// The capsule declares what it wants to do. The kernel classifies risk
+/// and manages allowances internally — the capsule sees only approved/denied.
+/// This follows the OS permission model: user space requests, the system decides.
 pub mod approval {
     use super::*;
-
-    /// Risk classification for an approval request.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum RiskLevel {
-        Low,
-        Medium,
-        High,
-        Critical,
-    }
-
-    impl RiskLevel {
-        /// Convert to the wire-format string expected by the WIT interface.
-        fn as_str(&self) -> &'static str {
-            match self {
-                Self::Low => "low",
-                Self::Medium => "medium",
-                Self::High => "high",
-                Self::Critical => "critical",
-            }
-        }
-    }
-
-    /// The decision made by the user or allowance store.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum ApprovalDecision {
-        /// Approved for this single invocation.
-        Approved,
-        /// Approved for the remainder of this session.
-        ApprovedSession,
-        /// Approved permanently (stored as an allowance).
-        ApprovedAlways,
-        /// Denied by the user.
-        Denied,
-        /// Auto-approved via an existing allowance (no user prompt).
-        Allowance,
-    }
-
-    impl ApprovalDecision {
-        /// Parse from the wire-format string returned by the WIT interface.
-        fn from_wire(s: &str) -> Self {
-            match s {
-                "approve" => Self::Approved,
-                "approve_session" => Self::ApprovedSession,
-                "approve_always" => Self::ApprovedAlways,
-                "deny" => Self::Denied,
-                "allowance" => Self::Allowance,
-                // Defensive: treat unknown decisions as denied (fail-closed).
-                _ => Self::Denied,
-            }
-        }
-    }
-
-    /// The result of an approval request.
-    #[derive(Debug)]
-    pub struct ApprovalResult {
-        /// Whether the action was approved.
-        pub approved: bool,
-        /// The typed decision.
-        pub decision: ApprovalDecision,
-    }
-
-    impl ApprovalResult {
-        /// Whether the action was approved (convenience alias for `self.approved`).
-        #[must_use]
-        pub fn was_approved(&self) -> bool {
-            self.approved
-        }
-    }
 
     /// Request human approval for a sensitive action.
     ///
@@ -1591,24 +1523,25 @@ pub mod approval {
     /// times out. If an existing allowance matches, returns immediately
     /// without prompting.
     ///
-    /// - `action` - short description of the action (e.g. "git push")
-    /// - `resource` - full resource identifier (e.g. "git push origin main")
-    /// - `risk_level` - severity classification for the action
-    pub fn request(
-        action: &str,
-        resource: &str,
-        risk_level: RiskLevel,
-    ) -> Result<ApprovalResult, SysError> {
+    /// Returns `true` if approved, `false` if denied.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if approval::request("git push", "git push origin main")? {
+    ///     // proceed with the push
+    /// }
+    /// ```
+    pub fn request(action: &str, resource: &str) -> Result<bool, SysError> {
         let req = wit_types::ApprovalRequest {
             action: action.to_string(),
             target_resource: resource.to_string(),
-            risk_level: risk_level.as_str().to_string(),
+            // Risk level is classified by the kernel, not the capsule.
+            // The WIT field is retained for backward compat but the kernel
+            // overrides it via SecurityPolicy.
+            risk_level: String::new(),
         };
         let resp = wit_approval::request_approval(&req).map_err(SysError::HostError)?;
-        Ok(ApprovalResult {
-            approved: resp.approved,
-            decision: ApprovalDecision::from_wire(&resp.decision),
-        })
+        Ok(resp.approved)
     }
 }
 
