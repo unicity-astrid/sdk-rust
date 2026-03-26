@@ -1,0 +1,25 @@
+package test:capsule-events@1.0.0;
+
+interface events {
+    /// A test event published on the bus.
+    record test-event {
+        /// Unique event identifier.
+        id: string,
+        /// How many times this event has fired.
+        count: u32,
+        /// Optional human-readable label.
+        label: option<string>,
+        /// Tags for categorization.
+        tags: list<string>,
+    }
+
+    /// Event severity levels.
+    enum severity {
+        /// Informational.
+        info,
+        /// Warning.
+        warn,
+        /// Error.
+        error,
+    }
+}

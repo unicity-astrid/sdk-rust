@@ -13,9 +13,77 @@
 
 extern crate proc_macro;
 
+mod wit_events;
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ImplItem, ItemImpl};
+
+/// Generate Rust types from a WIT file's record and enum definitions.
+///
+/// Reads the specified `.wit` file (relative to the crate root) and emits
+/// `pub struct` / `pub enum` definitions for every named WIT record and enum.
+/// Each generated type derives `Debug`, `Clone`, `PartialEq`, `Serialize`,
+/// and `Deserialize`. Field-level `///` doc comments from the WIT source
+/// are preserved as Rust doc comments.
+///
+/// # Example
+///
+/// Given `wit/events.wit`:
+/// ```wit
+/// package my:capsule-events@1.0.0;
+/// interface events {
+///     /// A thing that happened.
+///     record my-event {
+///         /// Unique ID.
+///         id: string,
+///         /// Event count.
+///         count: u32,
+///         /// Optional label.
+///         label: option<string>,
+///     }
+/// }
+/// ```
+///
+/// In your capsule's `lib.rs`:
+/// ```rust,ignore
+/// astrid_sdk::wit_events!("wit/events.wit");
+///
+/// // Now available:
+/// let event = MyEvent {
+///     id: "abc".into(),
+///     count: 42,
+///     label: None,
+/// };
+/// ipc::publish_json("my.v1.event", &event)?;
+/// ```
+#[proc_macro]
+pub fn wit_events(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    match wit_events_inner(input2) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Inner implementation of `wit_events!` — returns `syn::Result` for ergonomic error handling.
+fn wit_events_inner(input: proc_macro2::TokenStream) -> syn::Result<proc_macro2::TokenStream> {
+    let lit: syn::LitStr = syn::parse2(input)?;
+    let rel_path = lit.value();
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| syn::Error::new(lit.span(), "CARGO_MANIFEST_DIR not set"))?;
+    let wit_path = std::path::Path::new(&manifest_dir).join(&rel_path);
+
+    if !wit_path.exists() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("WIT file not found: {}", wit_path.display()),
+        ));
+    }
+
+    wit_events::generate(&wit_path, lit.span())
+}
 
 /// Marks an `impl` block as the entry point for an Astrid Capsule.
 ///

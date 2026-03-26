@@ -1567,4 +1567,7 @@ pub mod prelude {
 
     #[cfg(feature = "derive")]
     pub use astrid_sdk_macros::capsule;
+
+    #[cfg(feature = "derive")]
+    pub use astrid_sdk_macros::wit_events;
 }
