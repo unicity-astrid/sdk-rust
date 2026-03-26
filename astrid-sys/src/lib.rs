@@ -5,6 +5,7 @@
 //!
 //! - **Host import functions** — typed calls to the kernel (fs, ipc, kv, etc.)
 //! - **Guest export trait** — `Guest` trait that capsules implement
+//! - **`export!` macro** — wires a `Guest` implementation as component exports
 //! - **WIT types** — generated Rust structs for all WIT records
 //!
 //! Capsule authors typically use `astrid-sdk` (the ergonomic wrapper) rather
@@ -21,6 +22,7 @@ mod generated {
     wit_bindgen::generate!({
         world: "capsule",
         path: "../wit",
+        pub_export_macro: true,
     });
 }
 
