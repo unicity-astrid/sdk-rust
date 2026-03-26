@@ -687,7 +687,10 @@ fn capsule_impl(
                         );
                         Default::default()
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        let _ = ::astrid_sdk::prelude::log::error(
+                            &format!("upgrade: failed to load state: {e}")
+                        );
                         return;
                     }
                 };
@@ -736,7 +739,10 @@ fn capsule_impl(
                         );
                         Default::default()
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        let _ = ::astrid_sdk::prelude::log::error(
+                            &format!("run: failed to load state: {e}")
+                        );
                         return;
                     }
                 };
