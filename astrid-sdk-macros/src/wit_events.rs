@@ -5,6 +5,8 @@ use quote::{format_ident, quote};
 use wit_parser::{Resolve, Type, TypeDefKind};
 
 /// Parse a WIT file and generate Rust struct/enum definitions for all types.
+///
+/// Also emits a hidden `include_str!` so Cargo rebuilds when the WIT file changes.
 pub(crate) fn generate(
     wit_path: &std::path::Path,
     span: proc_macro2::Span,
@@ -22,6 +24,14 @@ pub(crate) fn generate(
         .map_err(|e| syn::Error::new(span, format!("failed to parse WIT: {e}")))?;
 
     let mut output = TokenStream::new();
+
+    // Emit include_str! so Cargo tracks the WIT file for incremental rebuilds.
+    let wit_path_str = wit_path
+        .to_str()
+        .ok_or_else(|| syn::Error::new(span, "WIT path is not valid UTF-8"))?;
+    output.extend(quote! {
+        const _: &str = include_str!(#wit_path_str);
+    });
 
     for (_, type_def) in &resolve.types {
         let Some(ref name) = type_def.name else {
@@ -43,6 +53,7 @@ pub(crate) fn generate(
                 output.extend(quote! {
                     #doc_attr
                     #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+                    #[serde(rename_all = "kebab-case")]
                     pub struct #rust_name {
                         #(#fields)*
                     }
@@ -74,6 +85,9 @@ pub(crate) fn generate(
                 });
             }
             TypeDefKind::Flags(flags_def) => {
+                // WIT flags are bitmasks — multiple can be set simultaneously.
+                // Generate an enum for the individual flag values and a type alias
+                // for Vec<FlagName> so serde serializes as a JSON array of strings.
                 let variants: Vec<TokenStream> = flags_def
                     .flags
                     .iter()
@@ -89,17 +103,20 @@ pub(crate) fn generate(
                         quote! { #flag_doc_attr #variant_name, }
                     })
                     .collect();
-                // Flags are serialized as arrays of strings.
+                let flag_enum_name = format_ident!("{}Flag", kebab_to_pascal(name));
                 output.extend(quote! {
                     #doc_attr
                     #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
                     #[serde(rename_all = "kebab-case")]
-                    pub enum #rust_name {
+                    pub enum #flag_enum_name {
                         #(#variants)*
                     }
+
+                    /// Set of [`#flag_enum_name`] values (serializes as a JSON array).
+                    pub type #rust_name = Vec<#flag_enum_name>;
                 });
             }
-            // Skip types we don't codegen (resources, handles, aliases, etc.).
+            // Skip types we don't codegen (resources, handles, variants, etc.).
             _ => {}
         }
     }
@@ -158,7 +175,9 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
         Type::F32 => (quote! { f32 }, false),
         Type::F64 => (quote! { f64 }, false),
         Type::Char => (quote! { char }, false),
-        Type::String | Type::ErrorContext => (quote! { String }, false),
+        Type::String => (quote! { String }, false),
+        // ErrorContext is an async resource handle — not meaningful in IPC events.
+        Type::ErrorContext => (quote! { String }, false),
         Type::Id(id) => {
             let type_def = &resolve.types[*id];
             match &type_def.kind {
@@ -167,8 +186,13 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
                     (quote! { Vec<#inner_ty> }, false)
                 }
                 TypeDefKind::Option(inner) => {
-                    let (inner_ty, _) = wit_type_to_rust(resolve, inner);
-                    (quote! { #inner_ty }, true)
+                    let (inner_ty, inner_optional) = wit_type_to_rust(resolve, inner);
+                    if inner_optional {
+                        // option<option<T>> — preserve both layers.
+                        (quote! { Option<#inner_ty> }, true)
+                    } else {
+                        (quote! { #inner_ty }, true)
+                    }
                 }
                 TypeDefKind::Tuple(tuple) => {
                     let types: Vec<TokenStream> = tuple
@@ -179,13 +203,18 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
                     (quote! { (#(#types),*) }, false)
                 }
                 TypeDefKind::Type(inner) => wit_type_to_rust(resolve, inner),
-                TypeDefKind::Record(_) | TypeDefKind::Enum(_) | TypeDefKind::Flags(_) => {
-                    // Reference to another named type — use its PascalCase name.
+                TypeDefKind::Record(_) | TypeDefKind::Enum(_) => {
                     let name = type_def.name.as_deref().unwrap_or("Unknown");
                     let ident = format_ident!("{}", kebab_to_pascal(name));
                     (quote! { #ident }, false)
                 }
-                // Fallback for unsupported types.
+                TypeDefKind::Flags(_) => {
+                    // Flags type alias is Vec<FlagEnum>, reference by the set name.
+                    let name = type_def.name.as_deref().unwrap_or("Unknown");
+                    let ident = format_ident!("{}", kebab_to_pascal(name));
+                    (quote! { #ident }, false)
+                }
+                // Fallback for unsupported types (variant, resource, handle, etc.).
                 _ => (quote! { ::serde_json::Value }, false),
             }
         }
