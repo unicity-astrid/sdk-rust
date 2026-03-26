@@ -33,7 +33,7 @@ pub(crate) fn generate(
             .docs
             .contents
             .as_deref()
-            .map(|d| d.trim())
+            .map(str::trim)
             .filter(|d| !d.is_empty());
         let doc_attr = doc.map(|d| quote! { #[doc = #d] });
 
@@ -58,7 +58,7 @@ pub(crate) fn generate(
                             .docs
                             .contents
                             .as_deref()
-                            .map(|d| d.trim())
+                            .map(str::trim)
                             .filter(|d| !d.is_empty());
                         let case_doc_attr = case_doc.map(|d| quote! { #[doc = #d] });
                         quote! { #case_doc_attr #variant_name, }
@@ -83,7 +83,7 @@ pub(crate) fn generate(
                             .docs
                             .contents
                             .as_deref()
-                            .map(|d| d.trim())
+                            .map(str::trim)
                             .filter(|d| !d.is_empty());
                         let flag_doc_attr = flag_doc.map(|d| quote! { #[doc = #d] });
                         quote! { #flag_doc_attr #variant_name, }
@@ -120,7 +120,7 @@ fn record_fields(resolve: &Resolve, record: &wit_parser::Record) -> Vec<TokenStr
                 .docs
                 .contents
                 .as_deref()
-                .map(|d| d.trim())
+                .map(str::trim)
                 .filter(|d| !d.is_empty());
             let doc_attr = doc.map(|d| quote! { #[doc = #d] });
 
@@ -158,8 +158,7 @@ fn wit_type_to_rust(resolve: &Resolve, ty: &Type) -> (TokenStream, bool) {
         Type::F32 => (quote! { f32 }, false),
         Type::F64 => (quote! { f64 }, false),
         Type::Char => (quote! { char }, false),
-        Type::String => (quote! { String }, false),
-        Type::ErrorContext => (quote! { String }, false),
+        Type::String | Type::ErrorContext => (quote! { String }, false),
         Type::Id(id) => {
             let type_def = &resolve.types[*id];
             match &type_def.kind {
