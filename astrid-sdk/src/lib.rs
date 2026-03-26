@@ -117,13 +117,6 @@ pub enum SysError {
     ApiError(String),
 }
 
-/// Convert bytes to a UTF-8 string, returning an error instead of silently
-/// corrupting non-UTF-8 data. The Component Model WIT `string` type requires
-/// valid UTF-8 — lossy conversion would silently garble binary payloads.
-fn bytes_to_str(bytes: &[u8]) -> Result<&str, SysError> {
-    std::str::from_utf8(bytes).map_err(|e| SysError::ApiError(format!("invalid UTF-8: {e}")))
-}
-
 pub mod fs;
 
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
@@ -165,35 +158,6 @@ pub mod ipc {
     pub fn publish_json<T: Serialize>(topic: &str, payload: &T) -> Result<(), SysError> {
         let json = serde_json::to_string(payload)?;
         publish(topic, &json)
-    }
-
-    /// Backward-compatible alias for [`publish`].
-    ///
-    /// **Deprecated:** The IPC bus now carries UTF-8 strings. The `&[u8]`
-    /// parameters will be validated as UTF-8 at runtime. Prefer [`publish`]
-    /// with `&str` parameters for compile-time safety.
-    #[deprecated(note = "Use ipc::publish(&str, &str) for compile-time UTF-8 safety")]
-    pub fn publish_bytes(topic: impl AsRef<[u8]>, payload: &[u8]) -> Result<(), SysError> {
-        let topic_str = bytes_to_str(topic.as_ref())?;
-        let payload_str = bytes_to_str(payload)?;
-        publish(topic_str, payload_str)
-    }
-
-    /// Publish a MessagePack-encoded value to an IPC topic.
-    ///
-    /// **Removed:** The IPC bus now carries UTF-8 strings (WIT `string`
-    /// type). MessagePack is binary and cannot be sent as a string payload.
-    /// Use [`publish_json`] instead.
-    #[deprecated(note = "IPC bus carries UTF-8 strings. Use publish_json instead.")]
-    pub fn publish_msgpack<T: Serialize>(
-        _topic: impl AsRef<[u8]>,
-        _payload: &T,
-    ) -> Result<(), SysError> {
-        Err(SysError::ApiError(
-            "publish_msgpack is no longer supported: IPC bus carries UTF-8 strings. \
-             Use publish_json instead."
-                .into(),
-        ))
     }
 
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.
@@ -296,22 +260,6 @@ pub mod uplink {
     ) -> Result<bool, SysError> {
         wit_uplink::uplink_send(&uplink_id.0, platform_user_id, content)
             .map_err(SysError::HostError)
-    }
-
-    /// Backward-compatible alias for [`send`].
-    #[deprecated(note = "Use uplink::send(&str, &str, &str) for compile-time UTF-8 safety")]
-    pub fn send_bytes(
-        uplink_id: &UplinkId,
-        platform_user_id: impl AsRef<[u8]>,
-        content: &[u8],
-    ) -> Result<Vec<u8>, SysError> {
-        let platform_user_str = bytes_to_str(platform_user_id.as_ref())?;
-        let content_str = bytes_to_str(content)?;
-        let sent = wit_uplink::uplink_send(&uplink_id.0, platform_user_str, content_str)
-            .map_err(SysError::HostError)?;
-        // Return a JSON-encoded boolean for backward compatibility.
-        let result = serde_json::to_vec(&sent)?;
-        Ok(result)
     }
 }
 
@@ -1003,10 +951,8 @@ pub mod runtime {
 pub mod hooks {
     use super::*;
 
-    pub fn trigger(event_bytes: &[u8]) -> Result<Vec<u8>, SysError> {
-        let request_json = bytes_to_str(event_bytes)?;
-        let result = wit_sys::trigger_hook(request_json).map_err(SysError::HostError)?;
-        Ok(result.into_bytes())
+    pub fn trigger(request_json: &str) -> Result<String, SysError> {
+        wit_sys::trigger_hook(request_json).map_err(SysError::HostError)
     }
 }
 
@@ -1036,14 +982,7 @@ pub mod capabilities {
 pub mod net;
 pub mod process {
     use super::*;
-    use serde::{Deserialize, Serialize};
-
-    /// Request payload for spawning a host process.
-    #[derive(Debug, Serialize)]
-    pub struct ProcessRequest<'a> {
-        pub cmd: &'a str,
-        pub args: &'a [&'a str],
-    }
+    use serde::Deserialize;
 
     /// Result returned from a spawned host process.
     #[derive(Debug, Deserialize)]
