@@ -245,23 +245,22 @@ interface spark {
 // ── Context engine (astrid-capsule-context-engine) ───────────────────
 
 /// Conversation compaction and token management.
-///
-/// Note: messages fields use opaque JSON values (not typed Message records)
-/// because the context engine treats messages as pass-through data.
 interface context {
+    use types.{message};
+
     /// Request to compact messages within a token budget.
     record compact-request {
         session-id: string,
-        /// Messages as opaque JSON array.
-        messages: string,
+        /// Current conversation messages.
+        messages: list<message>,
         max-tokens: u64,
         target-tokens: u64,
     }
 
     /// Result of compaction.
     record compact-response {
-        /// Compacted messages as opaque JSON array.
-        messages: string,
+        /// Messages after compaction.
+        messages: list<message>,
         compacted: bool,
         messages-removed: u32,
         strategy: string,
@@ -269,8 +268,8 @@ interface context {
 
     /// Request to estimate token count.
     record estimate-request {
-        /// Messages as opaque JSON array.
-        messages: string,
+        /// Messages to estimate token count for.
+        messages: list<message>,
     }
 
     /// Token count estimate.
@@ -281,8 +280,8 @@ interface context {
     /// Hook payload sent before compaction.
     record before-compaction-hook {
         session-id: string,
-        /// Messages as opaque JSON array.
-        messages: string,
+        /// Current messages.
+        messages: list<message>,
         message-count: u32,
         estimated-tokens: u64,
         max-tokens: u64,
@@ -314,10 +313,12 @@ interface context {
 
 /// Prompt assembly with plugin hooks.
 interface prompt {
+    use types.{message, tool-definition};
+
     /// Request to assemble a prompt for LLM generation.
     record assemble-request {
-        /// Conversation messages as opaque JSON.
-        messages: string,
+        /// Conversation messages.
+        messages: list<message>,
         system-prompt: string,
         request-id: string,
         model: string,
@@ -332,14 +333,14 @@ interface prompt {
         request-id: string,
         session-id: option<string>,
         /// Collected tool schemas from tool-providing capsules.
-        tools: string,
+        tools: list<tool-definition>,
         /// Session conversation history messages.
-        messages: string,
+        messages: list<message>,
     }
 
     /// Hook payload sent before prompt build.
     record before-build-hook {
-        messages: string,
+        messages: list<message>,
         system-prompt: string,
         request-id: string,
         model: string,
