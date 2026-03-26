@@ -18,20 +18,20 @@ pub(crate) fn generate(
     let mut output = TokenStream::new();
 
     if wit_path.is_dir() {
-        // Directory: parse all .wit files as a package.
-        resolve
-            .push_dir(wit_path)
-            .map_err(|e| syn::Error::new(span, format!("failed to parse WIT directory: {e}")))?;
+        let wit_files = collect_wit_files(wit_path, span)?;
+        if wit_files.is_empty() {
+            return Ok(output);
+        }
 
-        // Emit include_str! for each .wit file so Cargo tracks them.
-        if let Ok(entries) = std::fs::read_dir(wit_path) {
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("wit") {
-                    if let Some(p) = path.to_str() {
-                        output.extend(quote! { const _: &str = include_str!(#p); });
-                    }
-                }
+        // Multi-package directories need the WIT deps/ layout for cross-package
+        // `use` resolution. Build a temp structure: for each package, create a
+        // directory with the .wit file and a deps/ dir containing its dependencies.
+        load_multi_package_dir(&mut resolve, wit_path, &wit_files, span)?;
+
+        for path in &wit_files {
+            // Emit include_str! so Cargo tracks the file.
+            if let Some(p) = path.to_str() {
+                output.extend(quote! { const _: &str = include_str!(#p); });
             }
         }
     } else {
@@ -269,4 +269,168 @@ fn kebab_to_pascal(s: &str) -> String {
 /// Convert `kebab-case` to `snake_case`.
 fn kebab_to_snake(s: &str) -> String {
     s.replace('-', "_")
+}
+
+/// Load a directory of WIT files that may contain multiple packages with
+/// cross-package `use` references.
+///
+/// Creates a temp directory with the standard WIT deps layout so `push_dir`
+/// can resolve foreign references:
+/// ```text
+/// temp/<pkg>/
+///   <pkg>.wit
+///   deps/
+///     <dep-pkg>/
+///       <dep-pkg>.wit
+/// ```
+fn load_multi_package_dir(
+    resolve: &mut Resolve,
+    source_dir: &std::path::Path,
+    wit_files: &[std::path::PathBuf],
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
+    use std::collections::HashMap;
+
+    // Read all files and extract package names for dependency resolution.
+    let mut file_contents: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut pkg_by_file: HashMap<String, String> = HashMap::new(); // filename → "ns:name"
+
+    for path in wit_files {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            syn::Error::new(span, format!("failed to read '{}': {e}", path.display()))
+        })?;
+        // Extract package name (e.g., "astrid:types" from "package astrid:types@1.0.0;")
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("package ") {
+                let pkg_full = rest.trim_end_matches(';').trim();
+                let pkg_name = pkg_full.split_once('@').map_or(pkg_full, |(n, _)| n);
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    pkg_by_file.insert(filename.to_string(), pkg_name.to_string());
+                }
+                break;
+            }
+        }
+        file_contents.push((path.clone(), contents));
+    }
+
+    // Detect which packages each file depends on via `use ns:name/...`
+    let mut deps_by_file: HashMap<String, Vec<String>> = HashMap::new();
+    for (path, contents) in &file_contents {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut deps = Vec::new();
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("use ") {
+                // "use astrid:types/types.{message};" → "astrid:types"
+                if let Some(pkg) = rest.split('/').next() {
+                    let dep_name = pkg.split_once('@').map_or(pkg, |(n, _)| n);
+                    deps.push(dep_name.to_string());
+                }
+            }
+        }
+        deps_by_file.insert(filename, deps);
+    }
+
+    // Build temp dirs and load packages in dependency order.
+    // Foundation packages (no deps) first, then packages with deps.
+    let tmp_root = std::env::temp_dir().join(format!("astrid-wit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_root);
+
+    let mut loaded_pkgs: Vec<String> = Vec::new();
+
+    // Sort: files with no deps first, then files with deps.
+    let mut ordered: Vec<_> = file_contents.iter().collect();
+    ordered.sort_by_key(|(path, _)| {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let dep_count = deps_by_file.get(filename).map_or(0, |d| d.len());
+        dep_count
+    });
+
+    for (path, contents) in &ordered {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.wit");
+        let stem = filename.trim_end_matches(".wit");
+
+        let pkg_dir = tmp_root.join(stem);
+        std::fs::create_dir_all(&pkg_dir)
+            .map_err(|e| syn::Error::new(span, format!("failed to create temp dir: {e}")))?;
+        std::fs::write(pkg_dir.join(filename), contents)
+            .map_err(|e| syn::Error::new(span, format!("failed to write temp WIT: {e}")))?;
+
+        // Create deps/ with the files this package depends on.
+        if let Some(deps) = deps_by_file.get(filename) {
+            if !deps.is_empty() {
+                let deps_dir = pkg_dir.join("deps");
+                for dep_pkg_name in deps {
+                    // Find the file that provides this package.
+                    for (dep_filename, pkg_name) in &pkg_by_file {
+                        if pkg_name == dep_pkg_name {
+                            let dep_dir_name = dep_pkg_name.replace(':', "-");
+                            let dep_target = deps_dir.join(&dep_dir_name);
+                            std::fs::create_dir_all(&dep_target).map_err(|e| {
+                                syn::Error::new(span, format!("failed to create dep dir: {e}"))
+                            })?;
+                            // Copy the dep file.
+                            let dep_source = source_dir.join(dep_filename);
+                            let dep_contents =
+                                std::fs::read_to_string(&dep_source).map_err(|e| {
+                                    syn::Error::new(
+                                        span,
+                                        format!(
+                                            "failed to read dep '{}': {e}",
+                                            dep_source.display()
+                                        ),
+                                    )
+                                })?;
+                            std::fs::write(dep_target.join(dep_filename), dep_contents).map_err(
+                                |e| syn::Error::new(span, format!("failed to write dep: {e}")),
+                            )?;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        resolve
+            .push_dir(&pkg_dir)
+            .map_err(|e| syn::Error::new(span, format!("failed to resolve '{}': {e}", filename)))?;
+
+        if let Some(pkg_name) = pkg_by_file.get(filename) {
+            loaded_pkgs.push(pkg_name.clone());
+        }
+    }
+
+    // Cleanup temp dir (best-effort).
+    let _ = std::fs::remove_dir_all(&tmp_root);
+
+    Ok(())
+}
+
+/// Collect all `.wit` file paths from a directory.
+fn collect_wit_files(
+    dir: &std::path::Path,
+    span: proc_macro2::Span,
+) -> syn::Result<Vec<std::path::PathBuf>> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        syn::Error::new(
+            span,
+            format!("failed to read directory '{}': {e}", dir.display()),
+        )
+    })?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("wit"))
+        .collect())
 }

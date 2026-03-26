@@ -1,0 +1,374 @@
+/// Consolidated IPC event types for cross-capsule communication.
+///
+/// Merged from the canonical WIT interface definitions in
+/// `contracts/interfaces/` (unicity-astrid/wit submodule).
+/// All interfaces are in a single package so wit_events! can resolve
+/// intra-package type references without cross-package deps resolution.
+///
+/// Source of truth: `contracts/interfaces/*.wit`
+package astrid:contracts@1.0.0;
+
+// ── Foundation types ─────────────────────────────────────────────────
+
+/// Shared types used across all Astrid interfaces.
+interface types {
+    /// A conversation message.
+    record message {
+        role: message-role,
+        content: message-content,
+    }
+
+    enum message-role {
+        system,
+        user,
+        assistant,
+        tool,
+    }
+
+    /// Message content — text, tool calls, tool results, or mixed.
+    variant message-content {
+        text(string),
+        tool-calls(list<tool-call>),
+        tool-result(tool-call-result),
+        multi-part(list<content-part>),
+    }
+
+    variant content-part {
+        text(string),
+        image(image-data),
+    }
+
+    record image-data {
+        data: string,
+        media-type: string,
+    }
+
+    /// A tool call requested by the model.
+    record tool-call {
+        call-id: string,
+        tool-name: string,
+        arguments: string,
+    }
+
+    /// Result of executing a tool call.
+    record tool-call-result {
+        call-id: string,
+        content: string,
+        is-error: bool,
+    }
+
+    /// A tool definition provided to the model.
+    record tool-definition {
+        name: string,
+        description: option<string>,
+        input-schema: string,
+    }
+
+    /// Token usage statistics.
+    record usage {
+        input-tokens: u64,
+        output-tokens: u64,
+    }
+}
+
+// ── Registry ─────────────────────────────────────────────────────────
+
+/// LLM provider discovery and model management.
+interface registry {
+    /// An available LLM provider entry.
+    record provider-entry {
+        id: string,
+        description: string,
+        capsule: string,
+        capabilities: list<string>,
+    }
+
+    /// Request to list available providers.
+    record get-providers-request {
+        correlation-id: option<string>,
+    }
+
+    /// Response with available providers.
+    record get-providers-response {
+        providers: list<provider-entry>,
+        active-model: option<string>,
+    }
+
+    /// Request to change the active model.
+    record set-active-model-request {
+        model-id: string,
+    }
+
+    /// Event emitted when the active model changes.
+    record active-model-changed-event {
+        previous: option<string>,
+        current: string,
+        capsule: string,
+    }
+}
+
+// ── LLM ──────────────────────────────────────────────────────────────
+
+/// Streaming text generation with tool use support.
+interface llm {
+    use types.{message, tool-definition, usage};
+
+    /// Request to generate a response.
+    record generate-request {
+        request-id: string,
+        model: string,
+        messages: list<message>,
+        tools: list<tool-definition>,
+        system-prompt: string,
+    }
+
+    /// A streaming event from the provider.
+    variant stream-event {
+        text-delta(string),
+        tool-call-start(tool-call-start-event),
+        tool-call-delta(tool-call-delta-event),
+        tool-call-end(tool-call-end-event),
+        reasoning-delta(string),
+        usage(usage),
+        done,
+        error(string),
+    }
+
+    record tool-call-start-event {
+        id: string,
+        name: string,
+    }
+
+    record tool-call-delta-event {
+        id: string,
+        args-delta: string,
+    }
+
+    record tool-call-end-event {
+        id: string,
+    }
+
+    /// Final (non-streaming) response.
+    record generate-response {
+        message: message,
+        has-tool-calls: bool,
+        stop-reason: stop-reason,
+        usage: usage,
+    }
+
+    enum stop-reason {
+        end-turn,
+        max-tokens,
+        tool-use,
+        stop-sequence,
+    }
+}
+
+// ── Session ──────────────────────────────────────────────────────────
+
+/// Persistent conversation history management.
+interface session {
+    use types.{message};
+
+    /// Request to fetch conversation history.
+    record get-messages-request {
+        session-id: string,
+        correlation-id: string,
+        append-before-read: option<list<message>>,
+    }
+
+    /// Response containing conversation history.
+    record get-messages-response {
+        correlation-id: string,
+        messages: list<message>,
+    }
+
+    /// Request to clear a session and start fresh.
+    record clear-request {
+        session-id: string,
+        correlation-id: string,
+    }
+
+    /// Response confirming session cleared.
+    record clear-response {
+        correlation-id: string,
+        new-session-id: string,
+        old-session-id: string,
+    }
+
+    /// Fire-and-forget append to conversation history.
+    record append-request {
+        session-id: string,
+        messages: list<message>,
+    }
+}
+
+// ── Spark (agent persona) ────────────────────────────────────────────
+
+/// Agent persona and system prompt construction.
+interface spark {
+    /// Request to build the agent's system prompt.
+    record build-request {
+        workspace-root: string,
+        session-id: option<string>,
+    }
+
+    /// Response with the assembled system prompt.
+    record build-response {
+        prompt: string,
+        session-id: option<string>,
+    }
+}
+
+// ── Context engine ───────────────────────────────────────────────────
+
+/// Conversation compaction and token management.
+interface context {
+    use types.{message};
+
+    /// Request to compact messages within a token budget.
+    record compact-request {
+        session-id: string,
+        messages: list<message>,
+        max-tokens: u64,
+        target-tokens: u64,
+    }
+
+    /// Result of compaction.
+    record compact-response {
+        messages: list<message>,
+        compacted: bool,
+        messages-removed: u32,
+        strategy: string,
+    }
+
+    /// Request to estimate token count for messages.
+    record estimate-request {
+        messages: list<message>,
+    }
+
+    /// Token count estimate.
+    record estimate-response {
+        estimated-tokens: u64,
+    }
+
+    /// Hook payload sent before compaction.
+    record before-compaction-hook {
+        session-id: string,
+        messages: list<message>,
+        message-count: u32,
+        estimated-tokens: u64,
+        max-tokens: u64,
+        response-topic: string,
+    }
+
+    /// Plugin response to before-compaction hook.
+    record before-compaction-hook-response {
+        skip: option<bool>,
+        pinned-message-ids: list<string>,
+        custom-strategy: option<string>,
+    }
+
+    /// Notification after compaction completes.
+    record after-compaction-event {
+        session-id: string,
+        messages-before: u32,
+        messages-after: u32,
+        tokens-before: u64,
+        tokens-after: u64,
+        strategy-used: string,
+    }
+}
+
+// ── Prompt builder ───────────────────────────────────────────────────
+
+/// Prompt assembly with plugin hooks.
+interface prompt {
+    use types.{message};
+
+    /// Request to assemble a prompt for LLM generation.
+    record assemble-request {
+        messages: list<message>,
+        system-prompt: string,
+        request-id: string,
+        model: string,
+        provider: string,
+        session-id: option<string>,
+    }
+
+    /// Assembled prompt ready for LLM.
+    record assemble-response {
+        system-prompt: string,
+        user-context-prefix: string,
+        request-id: string,
+        session-id: option<string>,
+    }
+
+    /// Hook payload sent before prompt build.
+    record before-build-hook {
+        messages: list<message>,
+        system-prompt: string,
+        request-id: string,
+        model: string,
+        provider: string,
+        response-topic: string,
+    }
+
+    /// Plugin response to before-build hook.
+    record before-build-hook-response {
+        prepend-system-context: option<string>,
+        append-system-context: option<string>,
+        system-prompt: option<string>,
+        prepend-context: option<string>,
+    }
+
+    /// Notification after prompt is built.
+    record after-build-event {
+        system-prompt: string,
+        user-context-prefix: string,
+        request-id: string,
+    }
+}
+
+// ── Tool dispatch ────────────────────────────────────────────────────
+
+/// Tool call routing.
+interface tool {
+    use types.{tool-call, tool-call-result};
+
+    /// Request to cancel in-flight tool executions.
+    record cancel-request {
+        call-ids: list<string>,
+    }
+}
+
+// ── Hook bridge ──────────────────────────────────────────────────────
+
+/// Lifecycle-to-hook mapping.
+interface hook {
+    /// Lifecycle events emitted by the kernel.
+    enum lifecycle-event {
+        session-created,
+        session-ended,
+        tool-call-started,
+        tool-call-completed,
+        tool-result-persisting,
+        message-received,
+        message-sending,
+        message-sent,
+        sub-agent-spawned,
+        sub-agent-completed,
+        sub-agent-failed,
+        sub-agent-cancelled,
+        context-compaction-started,
+        context-compaction-completed,
+        kernel-started,
+        kernel-shutdown,
+    }
+
+    /// Result of a hook execution.
+    record hook-result {
+        hook-name: string,
+        payload: string,
+    }
+}
