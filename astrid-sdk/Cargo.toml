@@ -13,7 +13,6 @@ astrid-sdk-macros = { workspace = true, optional = true }
 astrid-sys = { workspace = true }
 astrid-types = { workspace = true }
 borsh = { version = "1.0.0", features = ["derive"] }
-rmp-serde = "1.3.0"
 schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }

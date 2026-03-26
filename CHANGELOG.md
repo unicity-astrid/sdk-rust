@@ -9,6 +9,42 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+### Breaking
+
+- **WASM engine migrated from Extism to wasmtime Component Model.** Capsules must be rebuilt targeting `wasm32-wasip2`. The `#[capsule]` macro now generates `impl Guest` + `export!()` instead of `extern "C"` exports. The ABI is completely different — existing `.wasm` binaries will not load. (#27)
+- **All `&[u8]` parameters changed to `&str`.** IPC topics, KV keys, filesystem paths, and uplink params now require UTF-8 at compile time (was runtime validation). (#31)
+- **Approval API simplified to OS permission model.** `approval::request(action, resource) -> Result<bool>` replaces the 3-param version with `RiskLevel`. Removed `RiskLevel`, `ApprovalDecision`, `ApprovalResult`. Capsules declare what they want; the kernel classifies risk. (#31, unicity-astrid/astrid#641)
+- **Interceptor errors halt the chain.** The `#[capsule]` macro returns `"deny"` on error (was `"error"` which the kernel silently treated as `"continue"`). (#27)
+- **`CallerContext` fields corrected.** `session_id` → `source_id` (capsule UUID), added `timestamp`. (#27)
+- **`identity::link` returns `Result<()>`.** Was `Result<Link>` with empty `linked_at` field. (#27)
+
+### Removed
+
+- `ipc::publish_bytes`, `ipc::publish_msgpack`, `ipc::poll_bytes`, `ipc::recv_bytes` — use typed `publish`/`publish_json`/`poll`/`recv`. (#31)
+- `uplink::send_bytes` — use `uplink::send`. (#31)
+- `net::bind_unix(path)` — use `net::bind_unix()` (no path arg). (#31)
+- `hooks::trigger(&[u8])` — now `trigger(&str) -> String`. (#31)
+- `process::ProcessRequest`, `SubscriptionHandle::as_bytes()`, `host_result.rs`, `cron` module. (#27, #31)
+- `extism-pdk` and `rmp-serde` dependencies. (#27, #31)
+
+### Added
+
+- **Typed IPC poll/recv.** `ipc::poll()` / `ipc::recv()` return `PollResult { messages: Vec<Message>, dropped, lagged }`. (#31)
+- **HTTP Response exposes status + headers.** `Response::status()`, `Response::headers()`, `Response::is_success()`. (#31)
+- **`log::trace()`.** All log functions now return `()` (was `Result`). (#31)
+- **Component Model test capsule.** `examples/test-capsule/` validates the full SDK→macro→WIT pipeline. (#27)
+- **Mandatory WIT exports.** `#[capsule]` macro generates all 4 guest exports with no-op stubs for unused ones. Solves unicity-astrid/astrid#638. (#27)
+
+### Changed
+
+- `astrid-sys` uses `wit_bindgen::generate!` instead of `extism_pdk` FFI. (#27)
+- `SysError::HostError` wraps `String` (was `extism_pdk::Error`). (#27)
+- Handle types internally wrap `u64` with consistent `id()` accessor. (#31)
+- `http::Response` fields private with accessor methods. (#31)
+- `interceptors::poll` handler receives typed `&ipc::PollResult`. (#31)
+- State not persisted on tool error. Install/upgrade/run errors logged. (#27)
+- `#![forbid(unsafe_code)]` on `astrid-sdk`. (#27)
+
 ## [0.5.3] - 2026-03-24
 
 ### Added

@@ -24,7 +24,7 @@ impl TestCapsule {
     #[astrid::mutable]
     fn increment(&mut self, _args: serde_json::Value) -> Result<serde_json::Value, SysError> {
         self.counter = self.counter.wrapping_add(1);
-        let _ = log::info(&format!("counter incremented to {}", self.counter));
+        log::info(&format!("counter incremented to {}", self.counter));
         Ok(serde_json::json!({ "counter": self.counter }))
     }
 
@@ -43,14 +43,14 @@ impl TestCapsule {
     /// Lifecycle: first-time install.
     #[astrid::install]
     fn install(&self) -> Result<(), SysError> {
-        let _ = log::info("test-capsule installed");
+        log::info("test-capsule installed");
         Ok(())
     }
 
     /// Lifecycle: upgrade from previous version.
     #[astrid::upgrade]
     fn upgrade(&self, prev_version: &str) -> Result<(), SysError> {
-        let _ = log::info(&format!("test-capsule upgraded from {prev_version}"));
+        log::info(&format!("test-capsule upgraded from {prev_version}"));
         Ok(())
     }
 }
