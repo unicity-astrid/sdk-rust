@@ -411,13 +411,14 @@ fn capsule_impl(
                                     Ok(state) => state,
                                     Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
                                     Err(e) => {
+                                        let err_call_id = tool_req.call_id.clone();
                                         let _ = ::astrid_sdk::prelude::ipc::publish_json(
                                             &format!("tool.v1.execute.{}.result", #name_val),
                                             &::serde_json::json!({
                                                 "type": "tool_execute_result",
-                                                "call_id": tool_req.call_id,
+                                                "call_id": err_call_id.clone(),
                                                 "result": {
-                                                    "call_id": tool_req.call_id,
+                                                    "call_id": err_call_id,
                                                     "content": format!("failed to load state: {}", e),
                                                     "is_error": true,
                                                 }
@@ -432,13 +433,14 @@ fn capsule_impl(
                             },
                             quote! {
                                 if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
+                                    let save_call_id = call_id.clone();
                                     let _ = ::astrid_sdk::prelude::ipc::publish_json(
                                         &format!("tool.v1.execute.{}.result", #name_val),
                                         &::serde_json::json!({
                                             "type": "tool_execute_result",
-                                            "call_id": call_id.clone(),
+                                            "call_id": save_call_id.clone(),
                                             "result": {
-                                                "call_id": call_id,
+                                                "call_id": save_call_id,
                                                 "content": format!("failed to save state: {}", e),
                                                 "is_error": true,
                                             }
@@ -700,7 +702,7 @@ fn capsule_impl(
     let run_body = if let Some(method_name) = &run_method {
         if is_stateful {
             quote! {
-                let instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
+                let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
                     Ok(state) => state,
                     Err(e @ ::astrid_sdk::SysError::JsonError(_)) => {
                         let _ = ::astrid_sdk::log::warn(

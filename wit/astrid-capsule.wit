@@ -106,8 +106,8 @@ interface types {
         status: u16,
         /// Response headers.
         headers: list<key-value-pair>,
-        /// Response body.
-        body: string,
+        /// Response body as raw bytes (may contain non-UTF-8 binary data).
+        body: list<u8>,
     }
 
     /// HTTP streaming response metadata returned on stream start.

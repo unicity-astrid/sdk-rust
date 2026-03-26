@@ -812,9 +812,7 @@ pub mod http {
     pub fn send(request: &Request) -> Result<Response, SysError> {
         let wit_req = request.to_wit();
         let result = wit_http::http_request(&wit_req).map_err(SysError::HostError)?;
-        Ok(Response {
-            bytes: result.body.into_bytes(),
-        })
+        Ok(Response { bytes: result.body })
     }
 
     /// Represents an active streaming HTTP response.
