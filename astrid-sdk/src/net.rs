@@ -61,20 +61,11 @@ impl core::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// Bind a Unix Domain Socket and return a listener handle.
-///
-/// The `path` argument is ignored — the kernel pre-provisions a single
-/// Unix socket per capsule. Use [`crate::runtime::socket_path()`] to
-/// discover the actual socket path.
-#[deprecated(note = "path argument is ignored; the kernel pre-binds the socket. \
-                      Use bind_unix_default() or pass any value.")]
-pub fn bind_unix(path: impl AsRef<[u8]>) -> Result<ListenerHandle, SysError> {
-    let _ = path;
-    bind_unix_default()
-}
-
 /// Bind the kernel-provisioned Unix Domain Socket and return a listener handle.
-pub fn bind_unix_default() -> Result<ListenerHandle, SysError> {
+///
+/// The kernel pre-provisions a single Unix socket per capsule. Use
+/// [`crate::runtime::socket_path()`] to discover the actual socket path.
+pub fn bind_unix() -> Result<ListenerHandle, SysError> {
     let handle = wit_net::net_bind_unix(0).map_err(SysError::HostError)?;
     Ok(ListenerHandle(handle))
 }

@@ -107,21 +107,10 @@ pub enum SysError {
     HostError(String),
     #[error("JSON serialization error: {0}")]
     JsonError(#[from] serde_json::Error),
-    #[error("MessagePack serialization error: {0}")]
-    MsgPackEncodeError(#[from] rmp_serde::encode::Error),
-    #[error("MessagePack deserialization error: {0}")]
-    MsgPackDecodeError(#[from] rmp_serde::decode::Error),
     #[error("Borsh serialization error: {0}")]
     BorshError(#[from] std::io::Error),
     #[error("API logic error: {0}")]
     ApiError(String),
-}
-
-/// Convert bytes to a UTF-8 string, returning an error instead of silently
-/// corrupting non-UTF-8 data. The Component Model WIT `string` type requires
-/// valid UTF-8 — lossy conversion would silently garble binary payloads.
-fn bytes_to_str(bytes: &[u8]) -> Result<&str, SysError> {
-    std::str::from_utf8(bytes).map_err(|e| SysError::ApiError(format!("invalid UTF-8: {e}")))
 }
 
 pub mod fs;
@@ -142,16 +131,7 @@ pub mod ipc {
         pub fn id(&self) -> u64 {
             self.0
         }
-
-        /// Raw handle bytes for interop with lower-level APIs.
-        #[must_use]
-        pub fn as_bytes(&self) -> Vec<u8> {
-            self.0.to_string().into_bytes()
-        }
     }
-
-    // Note: AsRef<[u8]> was removed — the handle now wraps u64, not bytes.
-    // Use `.id()` to get the u64 handle or `.as_bytes()` for a Vec<u8>.
 
     /// Publish a UTF-8 string payload to an IPC topic.
     ///
@@ -167,35 +147,6 @@ pub mod ipc {
         publish(topic, &json)
     }
 
-    /// Backward-compatible alias for [`publish`].
-    ///
-    /// **Deprecated:** The IPC bus now carries UTF-8 strings. The `&[u8]`
-    /// parameters will be validated as UTF-8 at runtime. Prefer [`publish`]
-    /// with `&str` parameters for compile-time safety.
-    #[deprecated(note = "Use ipc::publish(&str, &str) for compile-time UTF-8 safety")]
-    pub fn publish_bytes(topic: impl AsRef<[u8]>, payload: &[u8]) -> Result<(), SysError> {
-        let topic_str = bytes_to_str(topic.as_ref())?;
-        let payload_str = bytes_to_str(payload)?;
-        publish(topic_str, payload_str)
-    }
-
-    /// Publish a MessagePack-encoded value to an IPC topic.
-    ///
-    /// **Removed:** The IPC bus now carries UTF-8 strings (WIT `string`
-    /// type). MessagePack is binary and cannot be sent as a string payload.
-    /// Use [`publish_json`] instead.
-    #[deprecated(note = "IPC bus carries UTF-8 strings. Use publish_json instead.")]
-    pub fn publish_msgpack<T: Serialize>(
-        _topic: impl AsRef<[u8]>,
-        _payload: &T,
-    ) -> Result<(), SysError> {
-        Err(SysError::ApiError(
-            "publish_msgpack is no longer supported: IPC bus carries UTF-8 strings. \
-             Use publish_json instead."
-                .into(),
-        ))
-    }
-
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.
     pub fn subscribe(topic: &str) -> Result<SubscriptionHandle, SysError> {
         let handle_id = wit_ipc::ipc_subscribe(topic).map_err(SysError::HostError)?;
@@ -206,54 +157,56 @@ pub mod ipc {
         wit_ipc::ipc_unsubscribe(handle.0).map_err(SysError::HostError)
     }
 
-    pub fn poll_bytes(handle: &SubscriptionHandle) -> Result<Vec<u8>, SysError> {
+    /// A message received from the IPC bus.
+    #[derive(Debug, Clone)]
+    pub struct Message {
+        /// The topic this message was published on.
+        pub topic: String,
+        /// The message payload (JSON string).
+        pub payload: String,
+        /// UUID of the capsule that published this message.
+        pub source_id: String,
+    }
+
+    /// Result of polling or receiving from an IPC subscription.
+    #[derive(Debug)]
+    pub struct PollResult {
+        /// Messages received since the last poll/recv.
+        pub messages: Vec<Message>,
+        /// Number of messages dropped due to buffer overflow.
+        pub dropped: u64,
+        /// Cumulative lag (messages missed due to slow consumption).
+        pub lagged: u64,
+    }
+
+    /// Non-blocking poll for messages on a subscription.
+    pub fn poll(handle: &SubscriptionHandle) -> Result<PollResult, SysError> {
         let envelope = wit_ipc::ipc_poll(handle.0).map_err(SysError::HostError)?;
-        // Serialize the envelope back to JSON bytes for backwards compatibility
-        // with callers that expect raw JSON envelope bytes.
-        let json = envelope_to_json(&envelope)?;
-        Ok(json)
+        Ok(envelope_to_poll_result(envelope))
     }
 
-    /// Block until a message arrives on a subscription handle, or timeout.
+    /// Block until a message arrives on a subscription, or timeout.
     ///
-    /// Returns the message envelope (same format as `poll_bytes`), or an
-    /// empty-messages envelope if the timeout expires with no messages.
-    /// Max timeout is capped at 60 000 ms by the host.
-    pub fn recv_bytes(handle: &SubscriptionHandle, timeout_ms: u64) -> Result<Vec<u8>, SysError> {
+    /// Max timeout is capped at 60,000 ms by the host.
+    pub fn recv(handle: &SubscriptionHandle, timeout_ms: u64) -> Result<PollResult, SysError> {
         let envelope = wit_ipc::ipc_recv(handle.0, timeout_ms).map_err(SysError::HostError)?;
-        let json = envelope_to_json(&envelope)?;
-        Ok(json)
+        Ok(envelope_to_poll_result(envelope))
     }
 
-    /// Convert a WIT IpcEnvelope to JSON bytes for backward compatibility.
-    fn envelope_to_json(envelope: &wit_types::IpcEnvelope) -> Result<Vec<u8>, SysError> {
-        #[derive(Serialize)]
-        struct JsonEnvelope<'a> {
-            messages: Vec<JsonMessage<'a>>,
-            dropped: u64,
-            lagged: u64,
-        }
-        #[derive(Serialize)]
-        struct JsonMessage<'a> {
-            topic: &'a str,
-            payload: &'a str,
-            source_id: &'a str,
-        }
-
-        let json_envelope = JsonEnvelope {
+    fn envelope_to_poll_result(envelope: wit_types::IpcEnvelope) -> PollResult {
+        PollResult {
             messages: envelope
                 .messages
-                .iter()
-                .map(|m| JsonMessage {
-                    topic: &m.topic,
-                    payload: &m.payload,
-                    source_id: &m.source_id,
+                .into_iter()
+                .map(|m| Message {
+                    topic: m.topic,
+                    payload: m.payload,
+                    source_id: m.source_id,
                 })
                 .collect(),
             dropped: envelope.dropped,
             lagged: envelope.lagged,
-        };
-        serde_json::to_vec(&json_envelope).map_err(SysError::from)
+        }
     }
 }
 
@@ -296,22 +249,6 @@ pub mod uplink {
     ) -> Result<bool, SysError> {
         wit_uplink::uplink_send(&uplink_id.0, platform_user_id, content)
             .map_err(SysError::HostError)
-    }
-
-    /// Backward-compatible alias for [`send`].
-    #[deprecated(note = "Use uplink::send(&str, &str, &str) for compile-time UTF-8 safety")]
-    pub fn send_bytes(
-        uplink_id: &UplinkId,
-        platform_user_id: impl AsRef<[u8]>,
-        content: &[u8],
-    ) -> Result<Vec<u8>, SysError> {
-        let platform_user_str = bytes_to_str(platform_user_id.as_ref())?;
-        let content_str = bytes_to_str(content)?;
-        let sent = wit_uplink::uplink_send(&uplink_id.0, platform_user_str, content_str)
-            .map_err(SysError::HostError)?;
-        // Return a JSON-encoded boolean for backward compatibility.
-        let result = serde_json::to_vec(&sent)?;
-        Ok(result)
     }
 }
 
@@ -784,23 +721,32 @@ pub mod http {
     /// An HTTP response from a non-streaming request.
     #[derive(Debug)]
     pub struct Response {
-        bytes: Vec<u8>,
+        /// HTTP status code (e.g. 200, 404, 500).
+        pub status: u16,
+        /// Response headers.
+        pub headers: HashMap<String, String>,
+        body: Vec<u8>,
     }
 
     impl Response {
         /// The raw response body as bytes.
         pub fn bytes(&self) -> &[u8] {
-            &self.bytes
+            &self.body
         }
 
         /// The response body as a UTF-8 string.
         pub fn text(&self) -> Result<&str, SysError> {
-            core::str::from_utf8(&self.bytes).map_err(|e| SysError::ApiError(e.to_string()))
+            core::str::from_utf8(&self.body).map_err(|e| SysError::ApiError(e.to_string()))
         }
 
         /// Deserialize the response body as JSON.
         pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, SysError> {
-            serde_json::from_slice(&self.bytes).map_err(SysError::from)
+            serde_json::from_slice(&self.body).map_err(SysError::from)
+        }
+
+        /// Whether the status code indicates success (2xx).
+        pub fn is_success(&self) -> bool {
+            (200..300).contains(&self.status)
         }
     }
 
@@ -808,7 +754,16 @@ pub mod http {
     pub fn send(request: &Request) -> Result<Response, SysError> {
         let wit_req = request.to_wit();
         let result = wit_http::http_request(&wit_req).map_err(SysError::HostError)?;
-        Ok(Response { bytes: result.body })
+        let headers: HashMap<String, String> = result
+            .headers
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect();
+        Ok(Response {
+            status: result.status,
+            headers,
+            body: result.body,
+        })
     }
 
     /// Represents an active streaming HTTP response.
@@ -1003,10 +958,8 @@ pub mod runtime {
 pub mod hooks {
     use super::*;
 
-    pub fn trigger(event_bytes: &[u8]) -> Result<Vec<u8>, SysError> {
-        let request_json = bytes_to_str(event_bytes)?;
-        let result = wit_sys::trigger_hook(request_json).map_err(SysError::HostError)?;
-        Ok(result.into_bytes())
+    pub fn trigger(event: &str) -> Result<String, SysError> {
+        wit_sys::trigger_hook(event).map_err(SysError::HostError)
     }
 }
 
@@ -1036,14 +989,7 @@ pub mod capabilities {
 pub mod net;
 pub mod process {
     use super::*;
-    use serde::{Deserialize, Serialize};
-
-    /// Request payload for spawning a host process.
-    #[derive(Debug, Serialize)]
-    pub struct ProcessRequest<'a> {
-        pub cmd: &'a str,
-        pub args: &'a [&'a str],
-    }
+    use serde::Deserialize;
 
     /// Result returned from a spawned host process.
     #[derive(Debug, Deserialize)]
@@ -1313,7 +1259,7 @@ pub mod interceptors {
     }
 
     impl InterceptorBinding {
-        /// Return a subscription handle for use with `ipc::poll_bytes` / `ipc::recv_bytes`.
+        /// Return a subscription handle for use with [`ipc::poll`] / [`ipc::recv`].
         #[must_use]
         pub fn subscription_handle(&self) -> ipc::SubscriptionHandle {
             ipc::SubscriptionHandle(self.handle_id)
@@ -1345,27 +1291,17 @@ pub mod interceptors {
     /// Poll all interceptor subscriptions and dispatch pending events.
     ///
     /// For each binding with pending messages, calls
-    /// `handler(action, envelope_bytes)` once with the full batch envelope
-    /// (JSON with `messages` array, `dropped`, and `lagged` fields).
+    /// `handler(action, messages)` once with the typed [`ipc::PollResult`].
     /// Bindings with no pending messages are skipped.
     pub fn poll(
         bindings: &[InterceptorBinding],
-        mut handler: impl FnMut(&str, &[u8]),
+        mut handler: impl FnMut(&str, &ipc::PollResult),
     ) -> Result<(), SysError> {
         for binding in bindings {
             let handle = binding.subscription_handle();
-            let envelope = ipc::poll_bytes(&handle)?;
-
-            // poll_bytes always returns a JSON envelope like
-            // `{"messages":[],"dropped":0,"lagged":0}`. Check the
-            // messages array before calling the handler.
-            #[derive(serde::Deserialize)]
-            struct PollEnvelope {
-                messages: Vec<serde_json::Value>,
-            }
-            let parsed: PollEnvelope = serde_json::from_slice(&envelope)?;
-            if !parsed.messages.is_empty() {
-                handler(&binding.action, &envelope);
+            let result = ipc::poll(&handle)?;
+            if !result.messages.is_empty() {
+                handler(&binding.action, &result);
             }
         }
         Ok(())
