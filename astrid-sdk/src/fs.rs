@@ -1,11 +1,10 @@
 //! Virtual filesystem — mirrors [`std::fs`] naming and conventions.
 //!
 //! All paths are UTF-8 strings (the Astrid VFS has no concept of OS-specific
-//! path encoding). Operations go through the host via FFI — the WASM guest
-//! has no direct filesystem access.
+//! path encoding). Operations go through the host via WIT imports — the WASM
+//! guest has no direct filesystem access.
 
 use super::*;
-use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -140,50 +139,47 @@ impl Iterator for ReadDir {
 // ---------------------------------------------------------------------------
 
 /// Check if a path exists. Like [`std::fs::exists`] (nightly).
-pub fn exists(path: impl AsRef<[u8]>) -> Result<bool, SysError> {
-    let result = unsafe { astrid_fs_exists(path.as_ref().to_vec())? };
-    let decoded = crate::host_result::decode(result)?;
-    Ok(!decoded.is_empty() && decoded[0] != 0)
+pub fn exists(path: &str) -> Result<bool, SysError> {
+    let path_str = path;
+    wit_fs::fs_exists(path_str).map_err(SysError::HostError)
 }
 
 /// Read the entire contents of a file as bytes. Like [`std::fs::read`].
-pub fn read(path: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-    let result = unsafe { astrid_read_file(path.as_ref().to_vec())? };
-    crate::host_result::decode(result)
+pub fn read(path: &str) -> Result<Vec<u8>, SysError> {
+    let path_str = path;
+    wit_fs::read_file(path_str).map_err(SysError::HostError)
 }
 
 /// Read the entire contents of a file as a string. Like [`std::fs::read_to_string`].
-pub fn read_to_string(path: impl AsRef<[u8]>) -> Result<String, SysError> {
+pub fn read_to_string(path: &str) -> Result<String, SysError> {
     let bytes = read(path)?;
     String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))
 }
 
 /// Write bytes to a file. Like [`std::fs::write`].
-pub fn write(path: impl AsRef<[u8]>, contents: impl AsRef<[u8]>) -> Result<(), SysError> {
-    unsafe { astrid_write_file(path.as_ref().to_vec(), contents.as_ref().to_vec())? };
-    Ok(())
+pub fn write(path: &str, contents: &[u8]) -> Result<(), SysError> {
+    let path_str = path;
+    wit_fs::write_file(path_str, contents).map_err(SysError::HostError)
 }
 
 /// Create a directory. Like [`std::fs::create_dir`].
-pub fn create_dir(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-    unsafe { astrid_fs_mkdir(path.as_ref().to_vec())? };
-    Ok(())
+pub fn create_dir(path: &str) -> Result<(), SysError> {
+    let path_str = path;
+    wit_fs::fs_mkdir(path_str).map_err(SysError::HostError)
 }
 
 /// Read directory entries. Like [`std::fs::read_dir`].
 ///
 /// Returns an iterator over the entries in the directory. The host resolves
 /// all entries in a single call, so the iterator is fully materialized.
-pub fn read_dir(path: impl AsRef<[u8]>) -> Result<ReadDir, SysError> {
-    let raw = unsafe { astrid_fs_readdir(path.as_ref().to_vec())? };
-    let result = crate::host_result::decode(raw)?;
-    let path_str = String::from_utf8_lossy(path.as_ref());
+pub fn read_dir(path: &str) -> Result<ReadDir, SysError> {
+    let path_str = path;
+    let names = wit_fs::fs_readdir(path_str).map_err(SysError::HostError)?;
     let parent = if path_str.ends_with('/') || path_str.is_empty() {
-        path_str.into_owned()
+        path_str.to_string()
     } else {
         format!("{path_str}/")
     };
-    let names: Vec<String> = serde_json::from_slice(&result)?;
     let entries = names
         .into_iter()
         .map(|name| {
@@ -201,26 +197,18 @@ pub fn read_dir(path: impl AsRef<[u8]>) -> Result<ReadDir, SysError> {
 }
 
 /// Get file metadata. Like [`std::fs::metadata`].
-pub fn metadata(path: impl AsRef<[u8]>) -> Result<Metadata, SysError> {
-    let raw = unsafe { astrid_fs_stat(path.as_ref().to_vec())? };
-    let result = crate::host_result::decode(raw)?;
-    #[derive(Deserialize)]
-    struct RawMetadata {
-        size: u64,
-        #[serde(rename = "isDir")]
-        is_dir: bool,
-        mtime: u64,
-    }
-    let raw: RawMetadata = serde_json::from_slice(&result)?;
+pub fn metadata(path: &str) -> Result<Metadata, SysError> {
+    let path_str = path;
+    let stat = wit_fs::fs_stat(path_str).map_err(SysError::HostError)?;
     Ok(Metadata {
-        size: raw.size,
-        is_dir: raw.is_dir,
-        mtime: raw.mtime,
+        size: stat.size,
+        is_dir: stat.is_dir,
+        mtime: stat.mtime.unwrap_or(0),
     })
 }
 
 /// Remove a file. Like [`std::fs::remove_file`].
-pub fn remove_file(path: impl AsRef<[u8]>) -> Result<(), SysError> {
-    unsafe { astrid_fs_unlink(path.as_ref().to_vec())? };
-    Ok(())
+pub fn remove_file(path: &str) -> Result<(), SysError> {
+    let path_str = path;
+    wit_fs::fs_unlink(path_str).map_err(SysError::HostError)
 }

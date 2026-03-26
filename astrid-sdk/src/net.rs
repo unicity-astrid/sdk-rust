@@ -1,13 +1,12 @@
 use super::*;
-use serde::{Deserialize, Serialize};
 
 /// Represents a bound network listener.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListenerHandle(pub(crate) String);
+#[derive(Debug, Clone)]
+pub struct ListenerHandle(pub(crate) u64);
 
 /// Represents an open network stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamHandle(pub(crate) String);
+#[derive(Debug, Clone)]
+pub struct StreamHandle(pub(crate) u64);
 
 /// Error returned by [`recv`] when the stream is closed.
 ///
@@ -62,52 +61,36 @@ impl core::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// Wire-format status byte prepended to every `astrid_net_read` response.
+/// Bind a Unix Domain Socket and return a listener handle.
 ///
-/// Matches `NetReadStatus` in the host `net.rs`. Internal — callers receive
-/// [`TryRecvError`] or `Ok(bytes)` instead.
-#[repr(u8)]
-enum ReadStatus {
-    Data = 0x00,
-    Closed = 0x01,
-    Pending = 0x02,
-}
-
-impl ReadStatus {
-    fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            b if b == Self::Data as u8 => Some(Self::Data),
-            b if b == Self::Closed as u8 => Some(Self::Closed),
-            b if b == Self::Pending as u8 => Some(Self::Pending),
-            _ => None,
-        }
-    }
-}
-
-/// Bind a Unix Domain Socket to the given path and return a listener handle.
+/// The `path` argument is ignored — the kernel pre-provisions a single
+/// Unix socket per capsule. Use [`crate::runtime::socket_path()`] to
+/// discover the actual socket path.
+#[deprecated(note = "path argument is ignored; the kernel pre-binds the socket. \
+                      Use bind_unix_default() or pass any value.")]
 pub fn bind_unix(path: impl AsRef<[u8]>) -> Result<ListenerHandle, SysError> {
-    let bytes = unsafe { astrid_net_bind_unix(path.as_ref().to_vec())? };
-    let handle_str = String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))?;
-    Ok(ListenerHandle(handle_str))
+    let _ = path;
+    bind_unix_default()
+}
+
+/// Bind the kernel-provisioned Unix Domain Socket and return a listener handle.
+pub fn bind_unix_default() -> Result<ListenerHandle, SysError> {
+    let handle = wit_net::net_bind_unix(0).map_err(SysError::HostError)?;
+    Ok(ListenerHandle(handle))
 }
 
 /// Block until the next incoming connection arrives on the listener.
 pub fn accept(listener: &ListenerHandle) -> Result<StreamHandle, SysError> {
-    let bytes = unsafe { astrid_net_accept(listener.0.as_bytes().to_vec())? };
-    let handle_str = String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))?;
-    Ok(StreamHandle(handle_str))
+    let handle = wit_net::net_accept(listener.0).map_err(SysError::HostError)?;
+    Ok(StreamHandle(handle))
 }
 
 /// Non-blocking accept. Returns `Ok(Some(stream))` if a connection was
 /// pending, `Ok(None)` if no connection is ready yet, or `Err` on a
 /// listener error.
 pub fn try_accept(listener: &ListenerHandle) -> Result<Option<StreamHandle>, SysError> {
-    let bytes = unsafe { astrid_net_poll_accept(listener.0.as_bytes().to_vec())? };
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let handle_str = String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))?;
-    Ok(Some(StreamHandle(handle_str)))
+    let result = wit_net::net_poll_accept(listener.0).map_err(SysError::HostError)?;
+    Ok(result.map(StreamHandle))
 }
 
 /// Receive the next message from the stream, blocking until one arrives.
@@ -121,10 +104,10 @@ pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
             Ok(bytes) => return Ok(bytes),
             Err(TryRecvError::Closed) => return Err(RecvError),
             Err(TryRecvError::Empty) => {
-                // try_recv blocks in the host for up to 50ms per call, so this
-                // loop is not a true busy-wait. The sleep adds a small yield
-                // between host calls for good measure.
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                // The WIT net-read function is non-blocking. This is a polling
+                // loop — sleep between attempts to avoid spinning the CPU.
+                // 50ms balances responsiveness with CPU usage.
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
@@ -139,17 +122,11 @@ pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
 ///
 /// Analogous to [`std::sync::mpsc::Receiver::try_recv`].
 pub fn try_recv(stream: &StreamHandle) -> Result<Vec<u8>, TryRecvError> {
-    let bytes =
-        unsafe { astrid_net_read(stream.0.as_bytes().to_vec()).map_err(|_| TryRecvError::Closed)? };
-    // First byte is always the NetReadStatus discriminant (see host net.rs).
-    let status = bytes
-        .first()
-        .and_then(|&b| ReadStatus::from_byte(b))
-        .ok_or(TryRecvError::Closed)?;
+    let status = wit_net::net_read(stream.0).map_err(|_| TryRecvError::Closed)?;
     match status {
-        ReadStatus::Data => Ok(bytes[1..].to_vec()),
-        ReadStatus::Closed => Err(TryRecvError::Closed),
-        ReadStatus::Pending => Err(TryRecvError::Empty),
+        wit_types::NetReadStatus::Data(bytes) => Ok(bytes),
+        wit_types::NetReadStatus::Closed => Err(TryRecvError::Closed),
+        wit_types::NetReadStatus::Pending => Err(TryRecvError::Empty),
     }
 }
 
@@ -160,16 +137,12 @@ pub fn try_recv(stream: &StreamHandle) -> Result<Vec<u8>, TryRecvError> {
 ///
 /// Analogous to [`std::sync::mpsc::Sender::send`].
 pub fn send(stream: &StreamHandle, data: &[u8]) -> Result<(), SendError> {
-    unsafe {
-        astrid_net_write(stream.0.as_bytes().to_vec(), data.to_vec()).map_err(|_| SendError)?
-    };
-    Ok(())
+    wit_net::net_write(stream.0, data).map_err(|_| SendError)
 }
 
 /// Close an open stream, releasing its resources on the host.
 ///
 /// Idempotent — closing an already-closed handle is a no-op.
 pub fn close(stream: &StreamHandle) -> Result<(), SysError> {
-    unsafe { astrid_net_close_stream(stream.0.as_bytes().to_vec())? };
-    Ok(())
+    wit_net::net_close_stream(stream.0).map_err(SysError::HostError)
 }

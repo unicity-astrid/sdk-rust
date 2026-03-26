@@ -5,6 +5,9 @@ members = [
     "astrid-sdk-macros",
     "astrid-sys",
 ]
+# Test capsule targets wasm32-wasip2 — excluded from host-target workspace.
+# Build with: cd examples/test-capsule && cargo build --target wasm32-wasip2
+exclude = ["examples/test-capsule"]
 
 [workspace.package]
 version = "0.5.3"

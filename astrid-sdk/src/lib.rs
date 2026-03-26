@@ -26,7 +26,6 @@
 //! | [`ipc`]         | N/A              | Event bus messaging                    |
 //! | [`kv`]          | N/A              | Persistent key-value storage           |
 //! | [`http`]        | N/A              | Outbound HTTP requests                 |
-//! | [`cron`]        | N/A              | Scheduled background tasks             |
 //! | [`uplink`]      | N/A              | Direct frontend messaging              |
 //! | [`hooks`]       | N/A              | User middleware triggers               |
 //! | [`elicit`]      | N/A              | Interactive install/upgrade prompts    |
@@ -34,14 +33,18 @@
 //! | [`approval`]    | N/A              | Human approval for sensitive actions   |
 //! | [`types`]       | N/A              | IPC payload types and LLM schemas      |
 
-#![allow(unsafe_code)]
+#![forbid(unsafe_code)]
 #![allow(missing_docs)]
 #![deny(clippy::all)]
 #![deny(unreachable_pub)]
 #![deny(clippy::unwrap_used)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-use astrid_sys::*;
+use astrid_sys::astrid::capsule::{
+    approval as wit_approval, elicit as wit_elicit, fs as wit_fs, http as wit_http,
+    identity as wit_identity, ipc as wit_ipc, kv as wit_kv, net as wit_net, process as wit_process,
+    sys as wit_sys, types as wit_types, uplink as wit_uplink,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -75,13 +78,15 @@ pub mod types {
         StopReason, StreamEvent, ToolCall, ToolCallResult, Usage,
     };
 
-    /// Identifies the user and session that triggered the current capsule execution.
+    /// Identifies the caller that triggered the current capsule execution.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct CallerContext {
-        /// Session ID, if available.
-        pub session_id: Option<String>,
-        /// User ID, if available.
-        pub user_id: Option<String>,
+        /// UUID of the capsule that originated the IPC message.
+        pub source_id: String,
+        /// The acting principal (user ID), if available.
+        pub principal: Option<String>,
+        /// ISO 8601 timestamp of the originating message.
+        pub timestamp: String,
     }
 }
 pub use borsh;
@@ -91,7 +96,7 @@ pub use serde_json;
 // Re-exported for the #[capsule] macro's generated code. Not part of the
 // public API - capsule authors should never need to import these directly.
 #[doc(hidden)]
-pub use extism_pdk;
+pub use astrid_sys;
 #[doc(hidden)]
 pub use schemars;
 
@@ -99,7 +104,7 @@ pub use schemars;
 #[derive(Error, Debug)]
 pub enum SysError {
     #[error("Host function call failed: {0}")]
-    HostError(#[from] extism_pdk::Error),
+    HostError(String),
     #[error("JSON serialization error: {0}")]
     JsonError(#[from] serde_json::Error),
     #[error("MessagePack serialization error: {0}")]
@@ -112,8 +117,14 @@ pub enum SysError {
     ApiError(String),
 }
 
+/// Convert bytes to a UTF-8 string, returning an error instead of silently
+/// corrupting non-UTF-8 data. The Component Model WIT `string` type requires
+/// valid UTF-8 — lossy conversion would silently garble binary payloads.
+fn bytes_to_str(bytes: &[u8]) -> Result<&str, SysError> {
+    std::str::from_utf8(bytes).map_err(|e| SysError::ApiError(format!("invalid UTF-8: {e}")))
+}
+
 pub mod fs;
-pub(crate) mod host_result;
 
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
 pub mod ipc {
@@ -123,58 +134,84 @@ pub mod ipc {
     ///
     /// Follows the typed-handle pattern used by [`crate::net::ListenerHandle`].
     #[derive(Debug, Clone)]
-    pub struct SubscriptionHandle(pub(crate) Vec<u8>);
+    pub struct SubscriptionHandle(pub(crate) u64);
 
     impl SubscriptionHandle {
+        /// Raw handle ID for interop with lower-level APIs.
+        #[must_use]
+        pub fn id(&self) -> u64 {
+            self.0
+        }
+
         /// Raw handle bytes for interop with lower-level APIs.
         #[must_use]
-        pub fn as_bytes(&self) -> &[u8] {
-            &self.0
+        pub fn as_bytes(&self) -> Vec<u8> {
+            self.0.to_string().into_bytes()
         }
     }
 
-    // Allow existing code using `impl AsRef<[u8]>` to pass a SubscriptionHandle.
-    impl AsRef<[u8]> for SubscriptionHandle {
-        fn as_ref(&self) -> &[u8] {
-            &self.0
-        }
+    // Note: AsRef<[u8]> was removed — the handle now wraps u64, not bytes.
+    // Use `.id()` to get the u64 handle or `.as_bytes()` for a Vec<u8>.
+
+    /// Publish a UTF-8 string payload to an IPC topic.
+    ///
+    /// The IPC bus carries UTF-8 strings (WIT `string` type). For structured
+    /// data, use [`publish_json`] which handles serialization.
+    pub fn publish(topic: &str, payload: &str) -> Result<(), SysError> {
+        wit_ipc::ipc_publish(topic, payload).map_err(SysError::HostError)
     }
 
+    /// Publish a JSON-serialized value to an IPC topic.
+    pub fn publish_json<T: Serialize>(topic: &str, payload: &T) -> Result<(), SysError> {
+        let json = serde_json::to_string(payload)?;
+        publish(topic, &json)
+    }
+
+    /// Backward-compatible alias for [`publish`].
+    ///
+    /// **Deprecated:** The IPC bus now carries UTF-8 strings. The `&[u8]`
+    /// parameters will be validated as UTF-8 at runtime. Prefer [`publish`]
+    /// with `&str` parameters for compile-time safety.
+    #[deprecated(note = "Use ipc::publish(&str, &str) for compile-time UTF-8 safety")]
     pub fn publish_bytes(topic: impl AsRef<[u8]>, payload: &[u8]) -> Result<(), SysError> {
-        unsafe { astrid_ipc_publish(topic.as_ref().to_vec(), payload.to_vec())? };
-        Ok(())
+        let topic_str = bytes_to_str(topic.as_ref())?;
+        let payload_str = bytes_to_str(payload)?;
+        publish(topic_str, payload_str)
     }
 
-    pub fn publish_json<T: Serialize>(
-        topic: impl AsRef<[u8]>,
-        payload: &T,
-    ) -> Result<(), SysError> {
-        let bytes = serde_json::to_vec(payload)?;
-        publish_bytes(topic, &bytes)
-    }
-
+    /// Publish a MessagePack-encoded value to an IPC topic.
+    ///
+    /// **Removed:** The IPC bus now carries UTF-8 strings (WIT `string`
+    /// type). MessagePack is binary and cannot be sent as a string payload.
+    /// Use [`publish_json`] instead.
+    #[deprecated(note = "IPC bus carries UTF-8 strings. Use publish_json instead.")]
     pub fn publish_msgpack<T: Serialize>(
-        topic: impl AsRef<[u8]>,
-        payload: &T,
+        _topic: impl AsRef<[u8]>,
+        _payload: &T,
     ) -> Result<(), SysError> {
-        let bytes = rmp_serde::to_vec_named(payload)?;
-        publish_bytes(topic, &bytes)
+        Err(SysError::ApiError(
+            "publish_msgpack is no longer supported: IPC bus carries UTF-8 strings. \
+             Use publish_json instead."
+                .into(),
+        ))
     }
 
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.
-    pub fn subscribe(topic: impl AsRef<[u8]>) -> Result<SubscriptionHandle, SysError> {
-        let handle_bytes = unsafe { astrid_ipc_subscribe(topic.as_ref().to_vec())? };
-        Ok(SubscriptionHandle(handle_bytes))
+    pub fn subscribe(topic: &str) -> Result<SubscriptionHandle, SysError> {
+        let handle_id = wit_ipc::ipc_subscribe(topic).map_err(SysError::HostError)?;
+        Ok(SubscriptionHandle(handle_id))
     }
 
     pub fn unsubscribe(handle: &SubscriptionHandle) -> Result<(), SysError> {
-        unsafe { astrid_ipc_unsubscribe(handle.0.clone())? };
-        Ok(())
+        wit_ipc::ipc_unsubscribe(handle.0).map_err(SysError::HostError)
     }
 
     pub fn poll_bytes(handle: &SubscriptionHandle) -> Result<Vec<u8>, SysError> {
-        let message_bytes = unsafe { astrid_ipc_poll(handle.0.clone())? };
-        Ok(message_bytes)
+        let envelope = wit_ipc::ipc_poll(handle.0).map_err(SysError::HostError)?;
+        // Serialize the envelope back to JSON bytes for backwards compatibility
+        // with callers that expect raw JSON envelope bytes.
+        let json = envelope_to_json(&envelope)?;
+        Ok(json)
     }
 
     /// Block until a message arrives on a subscription handle, or timeout.
@@ -183,9 +220,40 @@ pub mod ipc {
     /// empty-messages envelope if the timeout expires with no messages.
     /// Max timeout is capped at 60 000 ms by the host.
     pub fn recv_bytes(handle: &SubscriptionHandle, timeout_ms: u64) -> Result<Vec<u8>, SysError> {
-        let timeout_str = timeout_ms.to_string();
-        let message_bytes = unsafe { astrid_ipc_recv(handle.0.clone(), timeout_str.into_bytes())? };
-        Ok(message_bytes)
+        let envelope = wit_ipc::ipc_recv(handle.0, timeout_ms).map_err(SysError::HostError)?;
+        let json = envelope_to_json(&envelope)?;
+        Ok(json)
+    }
+
+    /// Convert a WIT IpcEnvelope to JSON bytes for backward compatibility.
+    fn envelope_to_json(envelope: &wit_types::IpcEnvelope) -> Result<Vec<u8>, SysError> {
+        #[derive(Serialize)]
+        struct JsonEnvelope<'a> {
+            messages: Vec<JsonMessage<'a>>,
+            dropped: u64,
+            lagged: u64,
+        }
+        #[derive(Serialize)]
+        struct JsonMessage<'a> {
+            topic: &'a str,
+            payload: &'a str,
+            source_id: &'a str,
+        }
+
+        let json_envelope = JsonEnvelope {
+            messages: envelope
+                .messages
+                .iter()
+                .map(|m| JsonMessage {
+                    topic: &m.topic,
+                    payload: &m.payload,
+                    source_id: &m.source_id,
+                })
+                .collect(),
+            dropped: envelope.dropped,
+            lagged: envelope.lagged,
+        };
+        serde_json::to_vec(&json_envelope).map_err(SysError::from)
     }
 }
 
@@ -195,51 +263,54 @@ pub mod uplink {
 
     /// An opaque uplink connection identifier. Returned by [`register`].
     #[derive(Debug, Clone)]
-    pub struct UplinkId(pub(crate) Vec<u8>);
+    pub struct UplinkId(pub(crate) String);
 
     impl UplinkId {
         /// Raw ID bytes for interop with lower-level APIs.
         #[must_use]
         pub fn as_bytes(&self) -> &[u8] {
-            &self.0
+            self.0.as_bytes()
         }
     }
 
     impl AsRef<[u8]> for UplinkId {
         fn as_ref(&self) -> &[u8] {
-            &self.0
+            self.0.as_bytes()
         }
     }
 
     /// Register a new uplink connection. Returns a typed [`UplinkId`].
-    pub fn register(
-        name: impl AsRef<[u8]>,
-        platform: impl AsRef<[u8]>,
-        profile: impl AsRef<[u8]>,
-    ) -> Result<UplinkId, SysError> {
-        let id_bytes = unsafe {
-            astrid_uplink_register(
-                name.as_ref().to_vec(),
-                platform.as_ref().to_vec(),
-                profile.as_ref().to_vec(),
-            )?
-        };
-        Ok(UplinkId(id_bytes))
+    pub fn register(name: &str, platform: &str, profile: &str) -> Result<UplinkId, SysError> {
+        let id =
+            wit_uplink::uplink_register(name, platform, profile).map_err(SysError::HostError)?;
+        Ok(UplinkId(id))
     }
 
-    /// Send bytes to a user via an uplink.
+    /// Send a message to a user via an uplink.
+    ///
+    /// Returns `true` if sent, `false` if the message was dropped.
+    pub fn send(
+        uplink_id: &UplinkId,
+        platform_user_id: &str,
+        content: &str,
+    ) -> Result<bool, SysError> {
+        wit_uplink::uplink_send(&uplink_id.0, platform_user_id, content)
+            .map_err(SysError::HostError)
+    }
+
+    /// Backward-compatible alias for [`send`].
+    #[deprecated(note = "Use uplink::send(&str, &str, &str) for compile-time UTF-8 safety")]
     pub fn send_bytes(
         uplink_id: &UplinkId,
         platform_user_id: impl AsRef<[u8]>,
         content: &[u8],
     ) -> Result<Vec<u8>, SysError> {
-        let result = unsafe {
-            astrid_uplink_send(
-                uplink_id.0.clone(),
-                platform_user_id.as_ref().to_vec(),
-                content.to_vec(),
-            )?
-        };
+        let platform_user_str = bytes_to_str(platform_user_id.as_ref())?;
+        let content_str = bytes_to_str(content)?;
+        let sent = wit_uplink::uplink_send(&uplink_id.0, platform_user_str, content_str)
+            .map_err(SysError::HostError)?;
+        // Return a JSON-encoded boolean for backward compatibility.
+        let result = serde_json::to_vec(&sent)?;
         Ok(result)
     }
 }
@@ -248,23 +319,24 @@ pub mod uplink {
 pub mod kv {
     use super::*;
 
-    pub fn get_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let raw = unsafe { astrid_kv_get(key.as_ref().to_vec())? };
-        crate::host_result::decode(raw)
+    pub fn get_bytes(key: &str) -> Result<Vec<u8>, SysError> {
+        let key_str = key;
+        let result = wit_kv::kv_get(key_str).map_err(SysError::HostError)?;
+        Ok(result.unwrap_or_default())
     }
 
-    pub fn set_bytes(key: impl AsRef<[u8]>, value: &[u8]) -> Result<(), SysError> {
-        unsafe { astrid_kv_set(key.as_ref().to_vec(), value.to_vec())? };
-        Ok(())
+    pub fn set_bytes(key: &str, value: &[u8]) -> Result<(), SysError> {
+        let key_str = key;
+        wit_kv::kv_set(key_str, value).map_err(SysError::HostError)
     }
 
-    pub fn get_json<T: DeserializeOwned>(key: impl AsRef<[u8]>) -> Result<T, SysError> {
+    pub fn get_json<T: DeserializeOwned>(key: &str) -> Result<T, SysError> {
         let bytes = get_bytes(key)?;
         let parsed = serde_json::from_slice(&bytes)?;
         Ok(parsed)
     }
 
-    pub fn set_json<T: Serialize>(key: impl AsRef<[u8]>, value: &T) -> Result<(), SysError> {
+    pub fn set_json<T: Serialize>(key: &str, value: &T) -> Result<(), SysError> {
         let bytes = serde_json::to_vec(value)?;
         set_bytes(key, &bytes)
     }
@@ -274,40 +346,36 @@ pub mod kv {
     /// This is idempotent: deleting a non-existent key succeeds silently.
     /// The underlying store returns whether the key existed, but that
     /// information is not surfaced through the WASM host boundary.
-    pub fn delete(key: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_kv_delete(key.as_ref().to_vec())? };
-        Ok(())
+    pub fn delete(key: &str) -> Result<(), SysError> {
+        let key_str = key;
+        wit_kv::kv_delete(key_str).map_err(SysError::HostError)
     }
 
     /// List all keys matching a prefix.
     ///
     /// Returns an empty vec if no keys match. The prefix is matched
     /// against key names within the capsule's scoped namespace.
-    pub fn list_keys(prefix: impl AsRef<[u8]>) -> Result<Vec<String>, SysError> {
-        let raw = unsafe { astrid_kv_list_keys(prefix.as_ref().to_vec())? };
-        let result = crate::host_result::decode(raw)?;
-        let keys: Vec<String> = serde_json::from_slice(&result)?;
-        Ok(keys)
+    pub fn list_keys(prefix: &str) -> Result<Vec<String>, SysError> {
+        let prefix_str = prefix;
+        wit_kv::kv_list_keys(prefix_str).map_err(SysError::HostError)
     }
 
     /// Delete all keys matching a prefix.
     ///
     /// Returns the number of keys deleted. The prefix is matched
     /// against key names within the capsule's scoped namespace.
-    pub fn clear_prefix(prefix: impl AsRef<[u8]>) -> Result<u64, SysError> {
-        let raw = unsafe { astrid_kv_clear_prefix(prefix.as_ref().to_vec())? };
-        let result = crate::host_result::decode(raw)?;
-        let count: u64 = serde_json::from_slice(&result)?;
-        Ok(count)
+    pub fn clear_prefix(prefix: &str) -> Result<u64, SysError> {
+        let prefix_str = prefix;
+        wit_kv::kv_clear_prefix(prefix_str).map_err(SysError::HostError)
     }
 
-    pub fn get_borsh<T: BorshDeserialize>(key: impl AsRef<[u8]>) -> Result<T, SysError> {
+    pub fn get_borsh<T: BorshDeserialize>(key: &str) -> Result<T, SysError> {
         let bytes = get_bytes(key)?;
         let parsed = borsh::from_slice(&bytes)?;
         Ok(parsed)
     }
 
-    pub fn set_borsh<T: BorshSerialize>(key: impl AsRef<[u8]>, value: &T) -> Result<(), SysError> {
+    pub fn set_borsh<T: BorshSerialize>(key: &str, value: &T) -> Result<(), SysError> {
         let bytes = borsh::to_vec(value)?;
         set_bytes(key, &bytes)
     }
@@ -348,11 +416,7 @@ pub mod kv {
     ///
     /// The stored JSON looks like `{"__sv": 1, "data": { ... }}`.
     /// Use [`get_versioned`] or [`get_versioned_or_migrate`] to read it back.
-    pub fn set_versioned<T: Serialize>(
-        key: impl AsRef<[u8]>,
-        value: &T,
-        version: u32,
-    ) -> Result<(), SysError> {
+    pub fn set_versioned<T: Serialize>(key: &str, value: &T, version: u32) -> Result<(), SysError> {
         let envelope = VersionedEnvelope {
             schema_version: version,
             data: value,
@@ -371,10 +435,10 @@ pub mod kv {
     /// Data written by plain [`set_json`] (no envelope) returns
     /// [`Versioned::Unversioned`].
     pub fn get_versioned<T: DeserializeOwned>(
-        key: impl AsRef<[u8]>,
+        key: &str,
         current_version: u32,
     ) -> Result<Versioned<T>, SysError> {
-        let bytes = get_bytes(&key)?;
+        let bytes = get_bytes(key)?;
         parse_versioned(&bytes, current_version)
     }
 
@@ -384,7 +448,7 @@ pub mod kv {
         bytes: &[u8],
         current_version: u32,
     ) -> Result<Versioned<T>, SysError> {
-        // The host function `astrid_kv_get` returns an empty slice when the
+        // The host function `kv_get` returns an empty slice when the
         // key is absent. A present key written via set_json/set_versioned
         // always has at least the JSON envelope bytes, so empty = not found.
         if bytes.is_empty() {
@@ -454,12 +518,10 @@ pub mod kv {
     /// For [`Versioned::Unversioned`] data, `migrate_fn` is called with
     /// version 0. For [`Versioned::NotFound`], returns `None`.
     pub fn get_versioned_or_migrate<T: Serialize + DeserializeOwned>(
-        key: impl AsRef<[u8]>,
+        key: &str,
         current_version: u32,
         migrate_fn: impl FnOnce(serde_json::Value, u32) -> Result<T, SysError>,
     ) -> Result<Option<T>, SysError> {
-        let key = key.as_ref();
-
         match get_versioned::<T>(key, current_version)? {
             Versioned::Current(data) => Ok(Some(data)),
             Versioned::NeedsMigration {
@@ -701,8 +763,21 @@ pub mod http {
             Ok(self.header("Content-Type", "application/json").body(json))
         }
 
-        fn to_bytes(&self) -> Result<Vec<u8>, SysError> {
-            serde_json::to_vec(self).map_err(SysError::from)
+        /// Convert to the WIT HttpRequestData type.
+        fn to_wit(&self) -> wit_types::HttpRequestData {
+            wit_types::HttpRequestData {
+                url: self.url.clone(),
+                method: self.method.clone(),
+                headers: self
+                    .headers
+                    .iter()
+                    .map(|(k, v)| wit_types::KeyValuePair {
+                        key: k.clone(),
+                        value: v.clone(),
+                    })
+                    .collect(),
+                body: self.body.clone(),
+            }
         }
     }
 
@@ -731,9 +806,9 @@ pub mod http {
 
     /// Send an HTTP request and wait for the full response.
     pub fn send(request: &Request) -> Result<Response, SysError> {
-        let req_bytes = request.to_bytes()?;
-        let result = unsafe { astrid_http_request(req_bytes)? };
-        Ok(Response { bytes: result })
+        let wit_req = request.to_wit();
+        let result = wit_http::http_request(&wit_req).map_err(SysError::HostError)?;
+        Ok(Response { bytes: result.body })
     }
 
     /// Represents an active streaming HTTP response.
@@ -741,7 +816,7 @@ pub mod http {
     /// Must be explicitly closed via [`stream_close`] when done.
     /// Not `Clone` — each handle is a unique owner of the host-side resource.
     #[derive(Debug)]
-    pub struct HttpStreamHandle(String);
+    pub struct HttpStreamHandle(u64);
 
     /// Metadata returned when a streaming HTTP request is initiated.
     pub struct StreamStartResponse {
@@ -759,20 +834,17 @@ pub mod http {
     /// Returns a [`StreamStartResponse`] with the handle, status, and headers.
     /// Use [`stream_read`] to consume the body in chunks.
     pub fn stream_start(request: &Request) -> Result<StreamStartResponse, SysError> {
-        let req_bytes = request.to_bytes()?;
-        let result = unsafe { astrid_http_stream_start(req_bytes)? };
-
-        #[derive(serde::Deserialize)]
-        struct Resp {
-            handle: String,
-            status: u16,
-            headers: HashMap<String, String>,
-        }
-        let resp: Resp = serde_json::from_slice(&result)?;
+        let wit_req = request.to_wit();
+        let result = wit_http::http_stream_start(&wit_req).map_err(SysError::HostError)?;
+        let headers: HashMap<String, String> = result
+            .headers
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect();
         Ok(StreamStartResponse {
-            handle: HttpStreamHandle(resp.handle),
-            status: resp.status,
-            headers: resp.headers,
+            handle: HttpStreamHandle(result.handle),
+            status: result.status,
+            headers,
         })
     }
 
@@ -781,7 +853,7 @@ pub mod http {
     /// Returns `Ok(Some(bytes))` with the next chunk of data, or
     /// `Ok(None)` when the stream is exhausted (EOF).
     pub fn stream_read(stream: &HttpStreamHandle) -> Result<Option<Vec<u8>>, SysError> {
-        let result = unsafe { astrid_http_stream_read(stream.0.as_bytes().to_vec())? };
+        let result = wit_http::http_stream_read(stream.0).map_err(SysError::HostError)?;
         if result.is_empty() {
             Ok(None)
         } else {
@@ -793,35 +865,7 @@ pub mod http {
     ///
     /// Idempotent — closing an already-closed handle is a no-op.
     pub fn stream_close(stream: &HttpStreamHandle) -> Result<(), SysError> {
-        unsafe { astrid_http_stream_close(stream.0.as_bytes().to_vec())? };
-        Ok(())
-    }
-}
-
-/// The Cron Airlock — Dynamic Background Scheduling
-pub mod cron {
-    use super::*;
-
-    /// Schedule a dynamic cron job that will wake up this capsule.
-    pub fn schedule(
-        name: impl AsRef<[u8]>,
-        schedule: impl AsRef<[u8]>,
-        payload: &[u8],
-    ) -> Result<(), SysError> {
-        unsafe {
-            astrid_cron_schedule(
-                name.as_ref().to_vec(),
-                schedule.as_ref().to_vec(),
-                payload.to_vec(),
-            )?
-        };
-        Ok(())
-    }
-
-    /// Cancel a previously scheduled dynamic cron job.
-    pub fn cancel(name: impl AsRef<[u8]>) -> Result<(), SysError> {
-        unsafe { astrid_cron_cancel(name.as_ref().to_vec())? };
-        Ok(())
+        wit_http::http_stream_close(stream.0).map_err(SysError::HostError)
     }
 }
 
@@ -836,15 +880,16 @@ pub mod env {
     pub const CONFIG_SOCKET_PATH: &str = "ASTRID_SOCKET_PATH";
 
     /// Read a config value as raw bytes. Like `std::env::var_os`.
-    pub fn var_bytes(key: impl AsRef<[u8]>) -> Result<Vec<u8>, SysError> {
-        let result = unsafe { astrid_get_config(key.as_ref().to_vec())? };
-        Ok(result)
+    pub fn var_bytes(key: &str) -> Result<Vec<u8>, SysError> {
+        let key_str = key;
+        let result = wit_sys::get_config(key_str).map_err(SysError::HostError)?;
+        Ok(result.into_bytes())
     }
 
     /// Read a config value as a UTF-8 string. Like `std::env::var`.
-    pub fn var(key: impl AsRef<[u8]>) -> Result<String, SysError> {
-        let bytes = var_bytes(key)?;
-        String::from_utf8(bytes).map_err(|e| SysError::ApiError(e.to_string()))
+    pub fn var(key: &str) -> Result<String, SysError> {
+        let key_str = key;
+        wit_sys::get_config(key_str).map_err(SysError::HostError)
     }
 }
 
@@ -862,12 +907,7 @@ pub mod time {
     /// system clock. Unlike [`std::time::SystemTime::now`], this returns
     /// `Result` because the host call can fail.
     pub fn now() -> Result<std::time::SystemTime, SysError> {
-        let bytes = unsafe { astrid_clock_ms()? };
-        let s = String::from_utf8_lossy(&bytes);
-        let ms = s
-            .trim()
-            .parse::<u64>()
-            .map_err(|e| SysError::ApiError(format!("clock parse error: {e}")))?;
+        let ms = wit_sys::clock_ms();
         Ok(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
     }
 }
@@ -880,7 +920,15 @@ pub mod log {
     /// Log a message at the given level.
     pub fn log(level: &str, message: impl Display) -> Result<(), SysError> {
         let msg = format!("{message}");
-        unsafe { astrid_log(level.as_bytes().to_vec(), msg.into_bytes())? };
+        let wit_level = match level {
+            "trace" => wit_types::LogLevel::Trace,
+            "debug" => wit_types::LogLevel::Debug,
+            "info" => wit_types::LogLevel::Info,
+            "warn" => wit_types::LogLevel::Warn,
+            "error" => wit_types::LogLevel::Error,
+            _ => wit_types::LogLevel::Info,
+        };
+        wit_sys::log(wit_level, &msg);
         Ok(())
     }
 
@@ -915,15 +963,18 @@ pub mod runtime {
     /// kernel know this capsule is ready to receive events. The kernel waits
     /// for this signal before loading dependent capsules.
     pub fn signal_ready() -> Result<(), SysError> {
-        unsafe { astrid_signal_ready()? };
+        wit_sys::signal_ready();
         Ok(())
     }
 
     /// Retrieves the caller context (User ID and Session ID) for the current execution.
     pub fn caller() -> Result<crate::types::CallerContext, SysError> {
-        let bytes = unsafe { astrid_get_caller()? };
-        serde_json::from_slice(&bytes)
-            .map_err(|e| SysError::ApiError(format!("failed to parse caller context: {e}")))
+        let ctx = wit_sys::get_caller().map_err(SysError::HostError)?;
+        Ok(crate::types::CallerContext {
+            source_id: ctx.source_id,
+            principal: ctx.principal,
+            timestamp: ctx.timestamp,
+        })
     }
 
     /// Returns the kernel's Unix domain socket path.
@@ -931,19 +982,13 @@ pub mod runtime {
     /// Reads from the well-known `ASTRID_SOCKET_PATH` config key that the
     /// kernel injects into every capsule at load time.
     pub fn socket_path() -> Result<String, SysError> {
-        let raw = crate::env::var(crate::env::CONFIG_SOCKET_PATH)?;
-        // var() returns JSON-encoded values (quoted strings).
-        // Use proper JSON parsing to handle escape sequences correctly.
-        let path = serde_json::from_str::<String>(raw.trim()).or_else(|_| {
-            // Fallback: if the value isn't valid JSON, use it raw.
-            if raw.is_empty() {
-                Err(SysError::ApiError(
-                    "ASTRID_SOCKET_PATH config key is empty".to_string(),
-                ))
-            } else {
-                Ok(raw)
-            }
-        })?;
+        let path = crate::env::var(crate::env::CONFIG_SOCKET_PATH)?;
+        // WIT get-config returns values directly (no JSON encoding).
+        if path.is_empty() {
+            return Err(SysError::ApiError(
+                "ASTRID_SOCKET_PATH config key is empty".to_string(),
+            ));
+        }
         // Reject paths with null bytes - they would silently truncate at the OS level.
         if path.contains('\0') {
             return Err(SysError::ApiError(
@@ -959,7 +1004,9 @@ pub mod hooks {
     use super::*;
 
     pub fn trigger(event_bytes: &[u8]) -> Result<Vec<u8>, SysError> {
-        unsafe { Ok(astrid_trigger_hook(event_bytes.to_vec())?) }
+        let request_json = bytes_to_str(event_bytes)?;
+        let result = wit_sys::trigger_hook(request_json).map_err(SysError::HostError)?;
+        Ok(result.into_bytes())
     }
 }
 
@@ -977,14 +1024,12 @@ pub mod capabilities {
     /// given `capability` declared in its manifest. Returns `false` for
     /// unknown UUIDs, unknown capabilities, or on any error (fail-closed).
     pub fn check(source_uuid: &str, capability: &str) -> Result<bool, SysError> {
-        let request = serde_json::json!({
-            "source_uuid": source_uuid,
-            "capability": capability,
-        });
-        let request_bytes = serde_json::to_vec(&request)?;
-        let response_bytes = unsafe { astrid_check_capsule_capability(request_bytes)? };
-        let response: serde_json::Value = serde_json::from_slice(&response_bytes)?;
-        Ok(response["allowed"].as_bool().unwrap_or(false))
+        let request = wit_types::CapabilityCheckRequest {
+            source_uuid: source_uuid.to_string(),
+            capability: capability.to_string(),
+        };
+        let response = wit_sys::check_capsule_capability(&request).map_err(SysError::HostError)?;
+        Ok(response.allowed)
     }
 }
 
@@ -1011,11 +1056,16 @@ pub mod process {
     /// Spawns a native host process (blocks until completion).
     /// The Capsule must have the `host_process` capability granted for this command.
     pub fn spawn(cmd: &str, args: &[&str]) -> Result<ProcessResult, SysError> {
-        let req = ProcessRequest { cmd, args };
-        let req_bytes = serde_json::to_vec(&req)?;
-        let result_bytes = unsafe { astrid_spawn_host(req_bytes)? };
-        let result: ProcessResult = serde_json::from_slice(&result_bytes)?;
-        Ok(result)
+        let request = wit_types::SpawnRequest {
+            cmd: cmd.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        let result = wit_process::spawn(&request).map_err(SysError::HostError)?;
+        Ok(ProcessResult {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exit_code: result.exit_code,
+        })
     }
 
     // -------------------------------------------------------------------
@@ -1067,11 +1117,12 @@ pub mod process {
     /// Returns an opaque handle that can be used with [`read_logs`] and
     /// [`kill`]. The process runs sandboxed with piped stdout/stderr.
     pub fn spawn_background(cmd: &str, args: &[&str]) -> Result<BackgroundProcessHandle, SysError> {
-        let req = ProcessRequest { cmd, args };
-        let req_bytes = serde_json::to_vec(&req)?;
-        let result_bytes = unsafe { astrid_spawn_background_host(req_bytes)? };
-        let result: BackgroundProcessHandle = serde_json::from_slice(&result_bytes)?;
-        Ok(result)
+        let request = wit_types::SpawnRequest {
+            cmd: cmd.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        let result = wit_process::spawn_background(&request).map_err(SysError::HostError)?;
+        Ok(BackgroundProcessHandle { id: result.id })
     }
 
     /// Read buffered output from a background process.
@@ -1079,28 +1130,26 @@ pub mod process {
     /// Each call drains the buffer and returns only NEW output since the
     /// last read. Also reports whether the process is still running.
     pub fn read_logs(id: u64) -> Result<ProcessLogs, SysError> {
-        #[derive(Serialize)]
-        struct Req {
-            id: u64,
-        }
-        let req_bytes = serde_json::to_vec(&Req { id })?;
-        let result_bytes = unsafe { astrid_read_process_logs_host(req_bytes)? };
-        let result: ProcessLogs = serde_json::from_slice(&result_bytes)?;
-        Ok(result)
+        let result = wit_process::read_logs(id).map_err(SysError::HostError)?;
+        Ok(ProcessLogs {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            running: result.running,
+            exit_code: result.exit_code,
+        })
     }
 
     /// Kill a background process and release its resources.
     ///
     /// Returns any remaining buffered output along with the exit code.
     pub fn kill(id: u64) -> Result<KillResult, SysError> {
-        #[derive(Serialize)]
-        struct Req {
-            id: u64,
-        }
-        let req_bytes = serde_json::to_vec(&Req { id })?;
-        let result_bytes = unsafe { astrid_kill_process_host(req_bytes)? };
-        let result: KillResult = serde_json::from_slice(&result_bytes)?;
-        Ok(result)
+        let result = wit_process::kill(id).map_err(SysError::HostError)?;
+        Ok(KillResult {
+            killed: result.killed,
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        })
     }
 }
 
@@ -1111,20 +1160,6 @@ pub mod process {
 /// returns a host error.
 pub mod elicit {
     use super::*;
-
-    /// Internal request structure sent to the `astrid_elicit` host function.
-    #[derive(Serialize)]
-    struct ElicitRequest<'a> {
-        #[serde(rename = "type")]
-        kind: &'a str,
-        key: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        description: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        options: Option<&'a [&'a str]>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        default: Option<&'a str>,
-    }
 
     /// Validates that the elicit key is non-empty and not whitespace-only.
     fn validate_key(key: &str) -> Result<(), SysError> {
@@ -1138,23 +1173,20 @@ pub mod elicit {
     /// receives the value. Returns `Ok(())` confirming the user provided it.
     pub fn secret(key: &str, description: &str) -> Result<(), SysError> {
         validate_key(key)?;
-        let req = ElicitRequest {
-            kind: "secret",
-            key,
-            description: Some(description),
+        let req = wit_types::ElicitRequest {
+            elicit_type: "secret".to_string(),
+            key: key.to_string(),
+            description: description.to_string(),
             options: None,
-            default: None,
+            default_value: None,
         };
-        let req_bytes = serde_json::to_vec(&req)?;
-        // SAFETY: FFI call to Extism host function. The host validates the
-        // request and returns a well-formed JSON response or an Extism error.
-        let resp_bytes = unsafe { astrid_elicit(req_bytes)? };
+        let resp_str = wit_elicit::elicit(&req).map_err(SysError::HostError)?;
 
         #[derive(serde::Deserialize)]
         struct SecretResp {
             ok: bool,
         }
-        let resp: SecretResp = serde_json::from_slice(&resp_bytes)?;
+        let resp: SecretResp = serde_json::from_str(&resp_str)?;
         if !resp.ok {
             return Err(SysError::ApiError(
                 "kernel did not confirm secret storage".into(),
@@ -1166,21 +1198,7 @@ pub mod elicit {
     /// Check if a secret has been configured (without reading it).
     pub fn has_secret(key: &str) -> Result<bool, SysError> {
         validate_key(key)?;
-        #[derive(Serialize)]
-        struct HasSecretRequest<'a> {
-            key: &'a str,
-        }
-        let req_bytes = serde_json::to_vec(&HasSecretRequest { key })?;
-        // SAFETY: FFI call to Extism host function. The host checks the
-        // SecretStore and returns a JSON response or an Extism error.
-        let resp_bytes = unsafe { astrid_has_secret(req_bytes)? };
-
-        #[derive(serde::Deserialize)]
-        struct ExistsResp {
-            exists: bool,
-        }
-        let resp: ExistsResp = serde_json::from_slice(&resp_bytes)?;
-        Ok(resp.exists)
+        wit_elicit::has_secret(key).map_err(SysError::HostError)
     }
 
     /// Shared implementation for text elicitation with optional default.
@@ -1190,23 +1208,20 @@ pub mod elicit {
         default: Option<&str>,
     ) -> Result<String, SysError> {
         validate_key(key)?;
-        let req = ElicitRequest {
-            kind: "text",
-            key,
-            description: Some(description),
+        let req = wit_types::ElicitRequest {
+            elicit_type: "text".to_string(),
+            key: key.to_string(),
+            description: description.to_string(),
             options: None,
-            default,
+            default_value: default.map(|s| s.to_string()),
         };
-        let req_bytes = serde_json::to_vec(&req)?;
-        // SAFETY: FFI call to Extism host function. The host validates the
-        // request and returns a well-formed JSON response or an Extism error.
-        let resp_bytes = unsafe { astrid_elicit(req_bytes)? };
+        let resp_str = wit_elicit::elicit(&req).map_err(SysError::HostError)?;
 
         #[derive(serde::Deserialize)]
         struct TextResp {
             value: String,
         }
-        let resp: TextResp = serde_json::from_slice(&resp_bytes)?;
+        let resp: TextResp = serde_json::from_str(&resp_str)?;
         Ok(resp.value)
     }
 
@@ -1233,23 +1248,20 @@ pub mod elicit {
                 "select requires at least one option".into(),
             ));
         }
-        let req = ElicitRequest {
-            kind: "select",
-            key,
-            description: Some(description),
-            options: Some(options),
-            default: None,
+        let req = wit_types::ElicitRequest {
+            elicit_type: "select".to_string(),
+            key: key.to_string(),
+            description: description.to_string(),
+            options: Some(options.iter().map(|s| s.to_string()).collect()),
+            default_value: None,
         };
-        let req_bytes = serde_json::to_vec(&req)?;
-        // SAFETY: FFI call to Extism host function. The host validates the
-        // request and returns a well-formed JSON response or an Extism error.
-        let resp_bytes = unsafe { astrid_elicit(req_bytes)? };
+        let resp_str = wit_elicit::elicit(&req).map_err(SysError::HostError)?;
 
         #[derive(serde::Deserialize)]
         struct SelectResp {
             value: String,
         }
-        let resp: SelectResp = serde_json::from_slice(&resp_bytes)?;
+        let resp: SelectResp = serde_json::from_str(&resp_str)?;
         if !options.iter().any(|o| *o == resp.value) {
             let truncated: String = resp.value.chars().take(64).collect();
             return Err(SysError::ApiError(format!(
@@ -1262,23 +1274,20 @@ pub mod elicit {
     /// Prompt for multiple text values (array input).
     pub fn array(key: &str, description: &str) -> Result<Vec<String>, SysError> {
         validate_key(key)?;
-        let req = ElicitRequest {
-            kind: "array",
-            key,
-            description: Some(description),
+        let req = wit_types::ElicitRequest {
+            elicit_type: "array".to_string(),
+            key: key.to_string(),
+            description: description.to_string(),
             options: None,
-            default: None,
+            default_value: None,
         };
-        let req_bytes = serde_json::to_vec(&req)?;
-        // SAFETY: FFI call to Extism host function. The host validates the
-        // request and returns a well-formed JSON response or an Extism error.
-        let resp_bytes = unsafe { astrid_elicit(req_bytes)? };
+        let resp_str = wit_elicit::elicit(&req).map_err(SysError::HostError)?;
 
         #[derive(serde::Deserialize)]
         struct ArrayResp {
             values: Vec<String>,
         }
-        let resp: ArrayResp = serde_json::from_slice(&resp_bytes)?;
+        let resp: ArrayResp = serde_json::from_str(&resp_str)?;
         Ok(resp.values)
     }
 }
@@ -1293,9 +1302,9 @@ pub mod interceptors {
     use super::*;
 
     /// A single interceptor subscription binding.
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug)]
     pub struct InterceptorBinding {
-        /// The IPC subscription handle ID (as bytes for use with `ipc::poll_bytes`/`ipc::recv_bytes`).
+        /// The IPC subscription handle ID.
         pub handle_id: u64,
         /// The interceptor action name from the manifest.
         pub action: String,
@@ -1307,7 +1316,7 @@ pub mod interceptors {
         /// Return a subscription handle for use with `ipc::poll_bytes` / `ipc::recv_bytes`.
         #[must_use]
         pub fn subscription_handle(&self) -> ipc::SubscriptionHandle {
-            ipc::SubscriptionHandle(self.handle_id.to_string().into_bytes())
+            ipc::SubscriptionHandle(self.handle_id)
         }
 
         /// Return the raw handle ID bytes (for lower-level interop).
@@ -1322,12 +1331,15 @@ pub mod interceptors {
     /// Returns an empty vec if this capsule has no auto-subscribed interceptors
     /// (i.e. it does not have both `run()` and `[[interceptor]]`).
     pub fn bindings() -> Result<Vec<InterceptorBinding>, SysError> {
-        // SAFETY: FFI call to Extism host function. The host serializes
-        // `HostState.interceptor_handles` to JSON and returns valid UTF-8 bytes.
-        // Errors are propagated via the `?` operator.
-        let bytes = unsafe { astrid_get_interceptor_handles()? };
-        let bindings: Vec<InterceptorBinding> = serde_json::from_slice(&bytes)?;
-        Ok(bindings)
+        let handles = wit_ipc::get_interceptor_handles().map_err(SysError::HostError)?;
+        Ok(handles
+            .into_iter()
+            .map(|h| InterceptorBinding {
+                handle_id: h.handle_id,
+                action: h.action,
+                topic: h.topic,
+            })
+            .collect())
     }
 
     /// Poll all interceptor subscriptions and dispatch pending events.
@@ -1340,11 +1352,6 @@ pub mod interceptors {
         bindings: &[InterceptorBinding],
         mut handler: impl FnMut(&str, &[u8]),
     ) -> Result<(), SysError> {
-        #[derive(serde::Deserialize)]
-        struct PollEnvelope {
-            messages: Vec<serde_json::Value>,
-        }
-
         for binding in bindings {
             let handle = binding.subscription_handle();
             let envelope = ipc::poll_bytes(&handle)?;
@@ -1352,6 +1359,10 @@ pub mod interceptors {
             // poll_bytes always returns a JSON envelope like
             // `{"messages":[],"dropped":0,"lagged":0}`. Check the
             // messages array before calling the handler.
+            #[derive(serde::Deserialize)]
+            struct PollEnvelope {
+                messages: Vec<serde_json::Value>,
+            }
             let parsed: PollEnvelope = serde_json::from_slice(&envelope)?;
             if !parsed.messages.is_empty() {
                 handler(&binding.action, &envelope);
@@ -1423,28 +1434,11 @@ pub mod identity {
         platform: &str,
         platform_user_id: &str,
     ) -> Result<Option<ResolvedUser>, SysError> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            platform: &'a str,
-            platform_user_id: &'a str,
-        }
-
-        let req_bytes = serde_json::to_vec(&Req {
-            platform,
-            platform_user_id,
-        })?;
-
-        // SAFETY: FFI call to Extism host function.
-        let resp_bytes = unsafe { astrid_identity_resolve(req_bytes)? };
-
-        #[derive(Deserialize)]
-        struct Resp {
-            found: bool,
-            user_id: Option<String>,
-            display_name: Option<String>,
-            error: Option<String>,
-        }
-        let resp: Resp = serde_json::from_slice(&resp_bytes)?;
+        let request = wit_types::IdentityResolveRequest {
+            platform: platform.to_string(),
+            platform_user_id: platform_user_id.to_string(),
+        };
+        let resp = wit_identity::identity_resolve(&request).map_err(SysError::HostError)?;
         if resp.found {
             let user_id = resp.user_id.ok_or_else(|| {
                 SysError::ApiError("host returned found=true but user_id was missing".into())
@@ -1464,61 +1458,26 @@ pub mod identity {
     ///
     /// - `method` describes how the link was established (e.g. "chat_command", "system").
     ///
-    /// Returns the created link on success. Requires `identity = ["link"]` or higher.
+    /// Requires `identity = ["link"]` or higher.
     pub fn link(
         platform: &str,
         platform_user_id: &str,
         astrid_user_id: &str,
         method: &str,
-    ) -> Result<Link, SysError> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            platform: &'a str,
-            platform_user_id: &'a str,
-            astrid_user_id: &'a str,
-            method: &'a str,
-        }
-
-        let req_bytes = serde_json::to_vec(&Req {
-            platform,
-            platform_user_id,
-            astrid_user_id,
-            method,
-        })?;
-
-        // SAFETY: FFI call to Extism host function.
-        let resp_bytes = unsafe { astrid_identity_link(req_bytes)? };
-
-        #[derive(Deserialize)]
-        struct LinkInfo {
-            platform: String,
-            platform_user_id: String,
-            astrid_user_id: String,
-            linked_at: String,
-            method: String,
-        }
-        #[derive(Deserialize)]
-        struct Resp {
-            ok: bool,
-            error: Option<String>,
-            link: Option<LinkInfo>,
-        }
-        let resp: Resp = serde_json::from_slice(&resp_bytes)?;
+    ) -> Result<(), SysError> {
+        let request = wit_types::IdentityLinkRequest {
+            platform: platform.to_string(),
+            platform_user_id: platform_user_id.to_string(),
+            astrid_user_id: astrid_user_id.to_string(),
+            method: method.to_string(),
+        };
+        let resp = wit_identity::identity_link(&request).map_err(SysError::HostError)?;
         if !resp.ok {
             return Err(SysError::ApiError(
                 resp.error.unwrap_or_else(|| "identity link failed".into()),
             ));
         }
-        let l = resp
-            .link
-            .ok_or_else(|| SysError::ApiError("missing link in response".into()))?;
-        Ok(Link {
-            platform: l.platform,
-            platform_user_id: l.platform_user_id,
-            astrid_user_id: l.astrid_user_id,
-            linked_at: l.linked_at,
-            method: l.method,
-        })
+        Ok(())
     }
 
     /// Unlink a platform identity from its Astrid user.
@@ -1526,27 +1485,11 @@ pub mod identity {
     /// Returns `true` if a link was removed, `false` if none existed.
     /// Requires `identity = ["link"]` or higher.
     pub fn unlink(platform: &str, platform_user_id: &str) -> Result<bool, SysError> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            platform: &'a str,
-            platform_user_id: &'a str,
-        }
-
-        let req_bytes = serde_json::to_vec(&Req {
-            platform,
-            platform_user_id,
-        })?;
-
-        // SAFETY: FFI call to Extism host function.
-        let resp_bytes = unsafe { astrid_identity_unlink(req_bytes)? };
-
-        #[derive(Deserialize)]
-        struct Resp {
-            ok: bool,
-            error: Option<String>,
-            removed: Option<bool>,
-        }
-        let resp: Resp = serde_json::from_slice(&resp_bytes)?;
+        let request = wit_types::IdentityUnlinkRequest {
+            platform: platform.to_string(),
+            platform_user_id: platform_user_id.to_string(),
+        };
+        let resp = wit_identity::identity_unlink(&request).map_err(SysError::HostError)?;
         if !resp.ok {
             return Err(SysError::ApiError(
                 resp.error
@@ -1561,23 +1504,10 @@ pub mod identity {
     /// Returns the UUID of the newly created user.
     /// Requires `identity = ["admin"]`.
     pub fn create_user(display_name: Option<&str>) -> Result<String, SysError> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            display_name: Option<&'a str>,
-        }
-
-        let req_bytes = serde_json::to_vec(&Req { display_name })?;
-
-        // SAFETY: FFI call to Extism host function.
-        let resp_bytes = unsafe { astrid_identity_create_user(req_bytes)? };
-
-        #[derive(Deserialize)]
-        struct Resp {
-            ok: bool,
-            error: Option<String>,
-            user_id: Option<String>,
-        }
-        let resp: Resp = serde_json::from_slice(&resp_bytes)?;
+        let request = wit_types::IdentityCreateUserRequest {
+            display_name: display_name.map(|s| s.to_string()),
+        };
+        let resp = wit_identity::identity_create_user(&request).map_err(SysError::HostError)?;
         if !resp.ok {
             return Err(SysError::ApiError(
                 resp.error
@@ -1593,49 +1523,40 @@ pub mod identity {
     /// Returns all linked platform identities for the given user UUID.
     /// Requires `identity = ["link"]` or higher.
     pub fn list_links(astrid_user_id: &str) -> Result<Vec<Link>, SysError> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            astrid_user_id: &'a str,
-        }
-
-        let req_bytes = serde_json::to_vec(&Req { astrid_user_id })?;
-
-        // SAFETY: FFI call to Extism host function.
-        let resp_bytes = unsafe { astrid_identity_list_links(req_bytes)? };
-
-        #[derive(Deserialize)]
-        struct LinkInfo {
-            platform: String,
-            platform_user_id: String,
-            astrid_user_id: String,
-            linked_at: String,
-            method: String,
-        }
-        #[derive(Deserialize)]
-        struct Resp {
-            ok: bool,
-            error: Option<String>,
-            links: Option<Vec<LinkInfo>>,
-        }
-        let resp: Resp = serde_json::from_slice(&resp_bytes)?;
+        let request = wit_types::IdentityListLinksRequest {
+            astrid_user_id: astrid_user_id.to_string(),
+        };
+        let resp = wit_identity::identity_list_links(&request).map_err(SysError::HostError)?;
         if !resp.ok {
             return Err(SysError::ApiError(
                 resp.error
                     .unwrap_or_else(|| "identity list_links failed".into()),
             ));
         }
-        Ok(resp
-            .links
-            .unwrap_or_default()
-            .into_iter()
-            .map(|l| Link {
-                platform: l.platform,
-                platform_user_id: l.platform_user_id,
-                astrid_user_id: l.astrid_user_id,
-                linked_at: l.linked_at,
-                method: l.method,
-            })
-            .collect())
+        // Parse links from the links_json field.
+        if let Some(json_str) = &resp.links_json {
+            #[derive(Deserialize)]
+            struct LinkInfo {
+                platform: String,
+                platform_user_id: String,
+                astrid_user_id: String,
+                linked_at: String,
+                method: String,
+            }
+            let links: Vec<LinkInfo> = serde_json::from_str(json_str)?;
+            Ok(links
+                .into_iter()
+                .map(|l| Link {
+                    platform: l.platform,
+                    platform_user_id: l.platform_user_id,
+                    astrid_user_id: l.astrid_user_id,
+                    linked_at: l.linked_at,
+                    method: l.method,
+                })
+                .collect())
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -1666,31 +1587,12 @@ pub mod approval {
         resource: &str,
         risk_level: &str,
     ) -> Result<ApprovalResult, SysError> {
-        #[derive(Serialize)]
-        struct ApprovalRequest<'a> {
-            action: &'a str,
-            resource: &'a str,
-            risk_level: &'a str,
-        }
-
-        let req = ApprovalRequest {
-            action,
-            resource,
-            risk_level,
+        let req = wit_types::ApprovalRequest {
+            action: action.to_string(),
+            target_resource: resource.to_string(),
+            risk_level: risk_level.to_string(),
         };
-        let req_bytes = serde_json::to_vec(&req)?;
-
-        // SAFETY: FFI call to Extism host function. The host checks the
-        // AllowanceStore, publishes ApprovalRequired if needed, blocks
-        // until a response arrives, and returns a JSON result.
-        let resp_bytes = unsafe { astrid_request_approval(req_bytes)? };
-
-        #[derive(Deserialize)]
-        struct ApprovalResp {
-            approved: bool,
-            decision: String,
-        }
-        let resp: ApprovalResp = serde_json::from_slice(&resp_bytes)?;
+        let resp = wit_approval::request_approval(&req).map_err(SysError::HostError)?;
         Ok(ApprovalResult {
             approved: resp.approved,
             decision: resp.decision,
@@ -1704,7 +1606,6 @@ pub mod prelude {
         // Astrid-specific modules
         approval,
         capabilities,
-        cron,
         elicit,
         // std-mirrored modules
         env,
