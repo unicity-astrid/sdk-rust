@@ -29,10 +29,12 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Added
 
+- **`wit_events!` proc macro.** Reads a `.wit` file and generates Rust `pub struct` / `pub enum` definitions for every named WIT record and enum, with `Serialize + Deserialize + PartialEq + Clone + Debug` derives and `///` doc comments preserved. Capsule authors write WIT once — the same file feeds `wit_events!()` for Rust types and the core's `wit-parser` for JSON Schema extraction. Zero type duplication. (#32)
+- **Serde derives on all WIT-generated types.** `astrid-sys` now passes `generate_unused_types: true` and `additional_derives: [serde::Serialize, serde::Deserialize, PartialEq]` to `wit_bindgen::generate!`. (#32)
 - **Typed IPC poll/recv.** `ipc::poll()` / `ipc::recv()` return `PollResult { messages: Vec<Message>, dropped, lagged }`. (#31)
 - **HTTP Response exposes status + headers.** `Response::status()`, `Response::headers()`, `Response::is_success()`. (#31)
 - **`log::trace()`.** All log functions now return `()` (was `Result`). (#31)
-- **Component Model test capsule.** `examples/test-capsule/` validates the full SDK→macro→WIT pipeline. (#27)
+- **Component Model test capsule.** `examples/test-capsule/` validates the full SDK→macro→WIT pipeline, including `wit_events!` generated types used in `ipc::publish_json()`. (#27, #32)
 - **Mandatory WIT exports.** `#[capsule]` macro generates all 4 guest exports with no-op stubs for unused ones. Solves unicity-astrid/astrid#638. (#27)
 
 ### Changed

@@ -115,6 +115,20 @@ pub enum SysError {
 
 pub mod fs;
 
+/// Shared IPC event types generated from the canonical WIT contracts.
+///
+/// These types are the standard payloads for cross-capsule IPC topics
+/// (LLM requests, session messages, registry events, etc.). They are
+/// generated from the `unicity-astrid/wit` repository which defines
+/// the canonical WIT interfaces.
+///
+/// Capsule authors use these types with [`ipc::publish_json`] instead
+/// of defining their own structs for standard topics.
+#[cfg(feature = "derive")]
+pub mod contracts {
+    astrid_sdk_macros::wit_events!("../wit/contracts/astrid-contracts.wit");
+}
+
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
 pub mod ipc {
     use super::*;
@@ -1567,4 +1581,7 @@ pub mod prelude {
 
     #[cfg(feature = "derive")]
     pub use astrid_sdk_macros::capsule;
+
+    #[cfg(feature = "derive")]
+    pub use astrid_sdk_macros::wit_events;
 }

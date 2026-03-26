@@ -12,6 +12,10 @@
 
 use astrid_sdk::prelude::*;
 
+// Generate Rust types from WIT event definitions.
+// This produces `TestEvent` (struct) and `Severity` (enum).
+wit_events!("wit/events.wit");
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct TestCapsule {
     counter: u64,
@@ -32,6 +36,19 @@ impl TestCapsule {
     #[astrid::tool("get_counter")]
     fn get_counter(&self, _args: serde_json::Value) -> Result<serde_json::Value, SysError> {
         Ok(serde_json::json!({ "counter": self.counter }))
+    }
+
+    /// Publishes a WIT-typed event on the IPC bus.
+    #[astrid::tool("emit_event")]
+    fn emit_event(&self, _args: serde_json::Value) -> Result<serde_json::Value, SysError> {
+        let event = TestEvent {
+            id: "evt-001".into(),
+            count: 1,
+            label: Some("test".into()),
+            tags: vec!["demo".into()],
+        };
+        ipc::publish_json("test.v1.event.fired", &event)?;
+        Ok(serde_json::json!({ "published": true }))
     }
 
     /// An interceptor that passes through.

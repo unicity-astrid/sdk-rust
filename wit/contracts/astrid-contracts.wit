@@ -1,0 +1,411 @@
+/// Canonical IPC event types for cross-capsule communication.
+///
+/// These records define the JSON shapes that capsules publish and subscribe
+/// to on the IPC bus. Field names use kebab-case (WIT convention) and are
+/// mapped to snake_case in generated Rust structs via serde rename_all.
+///
+/// Source of truth: actual capsule implementations as of 2026-03-26.
+/// Canonical WIT interfaces: `contracts/interfaces/` (git submodule).
+package astrid:contracts@1.0.0;
+
+// ── Foundation types (astrid-types crate) ────────────────────────────
+
+/// Shared types used across all Astrid interfaces.
+interface types {
+    /// A conversation message.
+    record message {
+        role: message-role,
+        content: message-content,
+    }
+
+    /// Message role.
+    enum message-role {
+        system,
+        user,
+        assistant,
+        tool,
+    }
+
+    /// Message content — text, tool calls, tool results, or mixed.
+    ///
+    /// Note: the Rust type uses #[serde(untagged)] so there is no type
+    /// discriminant on the wire. This variant is for schema documentation.
+    variant message-content {
+        text(string),
+        tool-calls(list<tool-call>),
+        tool-result(tool-call-result),
+        multi-part(list<content-part>),
+    }
+
+    /// A part of multi-part content.
+    ///
+    /// Note: Rust uses #[serde(tag = "type", rename_all = "snake_case")]
+    /// so the wire format is {"type": "text", "text": "..."} or
+    /// {"type": "image", "data": "...", "media_type": "..."}.
+    variant content-part {
+        text(string),
+        image(image-data),
+    }
+
+    /// Image data embedded in a content part.
+    record image-data {
+        /// Base64-encoded image data.
+        data: string,
+        /// MIME type (e.g. "image/png").
+        media-type: string,
+    }
+
+    /// A tool call requested by the model.
+    record tool-call {
+        /// Tool call identifier.
+        id: string,
+        /// Name of the tool to invoke.
+        name: string,
+        /// JSON-encoded arguments (parsed as serde_json::Value in Rust).
+        arguments: string,
+    }
+
+    /// Result of executing a tool call.
+    record tool-call-result {
+        /// The tool call this result corresponds to.
+        call-id: string,
+        /// Result content (text).
+        content: string,
+        /// Whether the tool execution failed.
+        is-error: bool,
+    }
+
+    /// A tool definition provided to the model.
+    record tool-definition {
+        /// Tool name.
+        name: string,
+        /// Human-readable description.
+        description: option<string>,
+        /// JSON Schema for the tool's input (parsed as serde_json::Value in Rust).
+        input-schema: string,
+    }
+
+    /// Token usage statistics.
+    record usage {
+        /// Number of input tokens consumed.
+        input-tokens: u64,
+        /// Number of output tokens generated.
+        output-tokens: u64,
+    }
+}
+
+// ── Registry (astrid-capsule-registry) ───────────────────────────────
+
+/// LLM provider discovery and model management.
+interface registry {
+    /// An available LLM provider entry.
+    record provider-entry {
+        /// Model ID (e.g. "gpt-5.4", "claude-sonnet-4-20250514").
+        id: string,
+        /// Human-readable description.
+        description: string,
+        /// IPC topic to publish LLM requests to.
+        request-topic: string,
+        /// IPC topic the provider streams responses on.
+        stream-topic: string,
+        /// Model capabilities (e.g. "text", "vision", "tools").
+        capabilities: list<string>,
+        /// Provider's context window size in tokens.
+        context-window: option<u64>,
+        /// Provider's max output tokens per request.
+        max-output-tokens: option<u64>,
+    }
+}
+
+// ── LLM (astrid-types IpcPayload + capsule-react) ────────────────────
+
+/// Streaming text generation with tool use support.
+interface llm {
+    use types.{message, tool-definition, usage};
+
+    /// Request to generate a response (IpcPayload::LlmRequest).
+    record generate-request {
+        /// Unique request identifier (UUID as string).
+        request-id: string,
+        /// Target model identifier.
+        model: string,
+        /// Conversation messages.
+        messages: list<message>,
+        /// Tool definitions available to the model.
+        tools: list<tool-definition>,
+        /// System prompt.
+        system: string,
+    }
+
+    /// A streaming event from the provider.
+    ///
+    /// Note: Rust uses default externally-tagged enum (PascalCase variant
+    /// names). Wire format: {"TextDelta": "..."}, {"ToolCallStart": {...}}.
+    variant stream-event {
+        text-delta(string),
+        tool-call-start(tool-call-start-event),
+        tool-call-delta(tool-call-delta-event),
+        tool-call-end(tool-call-end-event),
+        reasoning-delta(string),
+        usage(usage),
+        done,
+        error(string),
+    }
+
+    record tool-call-start-event {
+        id: string,
+        name: string,
+    }
+
+    record tool-call-delta-event {
+        id: string,
+        args-delta: string,
+    }
+
+    record tool-call-end-event {
+        id: string,
+    }
+
+    /// Final (non-streaming) response.
+    record generate-response {
+        message: message,
+        has-tool-calls: bool,
+        stop-reason: stop-reason,
+        usage: usage,
+    }
+
+    /// Reason the model stopped generating.
+    ///
+    /// Note: Rust uses default externally-tagged enum (PascalCase).
+    /// Wire values: "EndTurn", "MaxTokens", "ToolUse", "StopSequence".
+    enum stop-reason {
+        end-turn,
+        max-tokens,
+        tool-use,
+        stop-sequence,
+    }
+}
+
+// ── Session (astrid-capsule-session) ─────────────────────────────────
+
+/// Persistent conversation history management.
+interface session {
+    use types.{message};
+
+    /// Request to fetch conversation history.
+    record get-messages-request {
+        session-id: string,
+        correlation-id: string,
+        append-before-read: option<list<message>>,
+    }
+
+    /// Response containing conversation history.
+    record get-messages-response {
+        correlation-id: string,
+        messages: list<message>,
+    }
+
+    /// Request to clear a session and start fresh.
+    record clear-request {
+        session-id: string,
+        correlation-id: string,
+    }
+
+    /// Response confirming session cleared.
+    record clear-response {
+        correlation-id: string,
+        new-session-id: string,
+        old-session-id: string,
+    }
+
+    /// Fire-and-forget append to conversation history.
+    record append-request {
+        session-id: string,
+        messages: list<message>,
+    }
+}
+
+// ── Spark (astrid-capsule-identity) ──────────────────────────────────
+
+/// Agent persona and system prompt construction.
+interface spark {
+    /// Request to build the agent's system prompt.
+    record build-request {
+        workspace-root: string,
+        session-id: option<string>,
+    }
+
+    /// Response with the assembled system prompt.
+    record build-response {
+        prompt: string,
+        session-id: option<string>,
+    }
+}
+
+// ── Context engine (astrid-capsule-context-engine) ───────────────────
+
+/// Conversation compaction and token management.
+interface context {
+    use types.{message};
+
+    /// Request to compact messages within a token budget.
+    record compact-request {
+        session-id: string,
+        /// Current conversation messages.
+        messages: list<message>,
+        max-tokens: u64,
+        target-tokens: u64,
+    }
+
+    /// Result of compaction.
+    record compact-response {
+        /// Messages after compaction.
+        messages: list<message>,
+        compacted: bool,
+        messages-removed: u32,
+        strategy: string,
+    }
+
+    /// Request to estimate token count.
+    record estimate-request {
+        /// Messages to estimate token count for.
+        messages: list<message>,
+    }
+
+    /// Token count estimate.
+    record estimate-response {
+        estimated-tokens: u64,
+    }
+
+    /// Hook payload sent before compaction.
+    record before-compaction-hook {
+        session-id: string,
+        /// Current messages.
+        messages: list<message>,
+        message-count: u32,
+        estimated-tokens: u64,
+        max-tokens: u64,
+        response-topic: string,
+    }
+
+    /// Plugin response to before-compaction hook.
+    ///
+    /// Note: Rust uses #[serde(rename_all = "camelCase")] so wire field
+    /// names are camelCase: pinnedMessageIds, customStrategy.
+    record before-compaction-hook-response {
+        skip: option<bool>,
+        pinned-message-ids: list<string>,
+        custom-strategy: option<string>,
+    }
+
+    /// Notification after compaction completes.
+    record after-compaction-event {
+        session-id: string,
+        messages-before: u32,
+        messages-after: u32,
+        tokens-before: u64,
+        tokens-after: u64,
+        strategy-used: string,
+    }
+}
+
+// ── Prompt builder (astrid-capsule-prompt-builder) ───────────────────
+
+/// Prompt assembly with plugin hooks.
+interface prompt {
+    use types.{message, tool-definition};
+
+    /// Request to assemble a prompt for LLM generation.
+    record assemble-request {
+        /// Conversation messages.
+        messages: list<message>,
+        system-prompt: string,
+        request-id: string,
+        model: string,
+        provider: string,
+        session-id: option<string>,
+    }
+
+    /// Assembled prompt ready for LLM.
+    record assemble-response {
+        system-prompt: string,
+        user-context-prefix: string,
+        request-id: string,
+        session-id: option<string>,
+        /// Collected tool schemas from tool-providing capsules.
+        tools: list<tool-definition>,
+        /// Session conversation history messages.
+        messages: list<message>,
+    }
+
+    /// Hook payload sent before prompt build.
+    record before-build-hook {
+        messages: list<message>,
+        system-prompt: string,
+        request-id: string,
+        model: string,
+        provider: string,
+        response-topic: string,
+    }
+
+    /// Plugin response to before-build hook.
+    ///
+    /// Note: Rust uses #[serde(rename_all = "camelCase")] so wire field
+    /// names are camelCase: prependSystemContext, appendSystemContext, etc.
+    record before-build-hook-response {
+        prepend-system-context: option<string>,
+        append-system-context: option<string>,
+        system-prompt: option<string>,
+        prepend-context: option<string>,
+    }
+
+    /// Notification after prompt is built.
+    record after-build-event {
+        system-prompt: string,
+        user-context-prefix: string,
+        request-id: string,
+    }
+}
+
+// ── Tool dispatch ────────────────────────────────────────────────────
+
+/// Tool call routing.
+interface tool {
+    /// Request to cancel in-flight tool executions.
+    record cancel-request {
+        call-ids: list<string>,
+    }
+}
+
+// ── Hook bridge (astrid-capsule-hook-bridge) ─────────────────────────
+
+/// Lifecycle-to-hook mapping and fan-out results.
+interface hook {
+    /// Lifecycle events emitted by the kernel.
+    enum lifecycle-event {
+        session-created,
+        session-ended,
+        tool-call-started,
+        tool-call-completed,
+        tool-result-persisting,
+        message-received,
+        message-sending,
+        message-sent,
+        sub-agent-spawned,
+        sub-agent-completed,
+        sub-agent-failed,
+        sub-agent-cancelled,
+        context-compaction-started,
+        context-compaction-completed,
+        kernel-started,
+        kernel-shutdown,
+    }
+
+    /// Merged result from hook fan-out.
+    record hook-result {
+        /// Whether the operation should be skipped.
+        skip: option<bool>,
+        /// Merged data from interceptor responses (opaque JSON).
+        data: option<string>,
+    }
+}
