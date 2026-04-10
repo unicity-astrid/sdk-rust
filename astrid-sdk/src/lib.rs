@@ -126,7 +126,7 @@ pub mod fs;
 /// of defining their own structs for standard topics.
 #[cfg(feature = "derive")]
 pub mod contracts {
-    astrid_sdk_macros::wit_events!("../wit/contracts/astrid-contracts.wit");
+    astrid_sdk_macros::wit_events!("wit/astrid-contracts.wit");
 }
 
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
