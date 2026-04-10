@@ -9,6 +9,8 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-10
+
 ### Breaking
 
 - **WASM engine migrated from Extism to wasmtime Component Model.** Capsules must be rebuilt targeting `wasm32-wasip2`. The `#[capsule]` macro now generates `impl Guest` + `export!()` instead of `extern "C"` exports. The ABI is completely different — existing `.wasm` binaries will not load. (#27)
