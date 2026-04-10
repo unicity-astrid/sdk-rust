@@ -21,7 +21,7 @@
 mod generated {
     wit_bindgen::generate!({
         world: "capsule",
-        path: "../wit",
+        path: "wit",
         pub_export_macro: true,
         generate_unused_types: true,
         additional_derives: [
