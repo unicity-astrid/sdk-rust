@@ -79,7 +79,7 @@ fn emit_type_definitions(resolve: &Resolve, output: &mut TokenStream) {
                 output.extend(quote! {
                     #doc_attr
                     #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(rename_all = "kebab-case")]
+                    #[serde(rename_all = "snake_case")]
                     pub struct #rust_name {
                         #(#fields)*
                     }
@@ -90,7 +90,7 @@ fn emit_type_definitions(resolve: &Resolve, output: &mut TokenStream) {
                 output.extend(quote! {
                     #doc_attr
                     #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(rename_all = "kebab-case")]
+                    #[serde(rename_all = "snake_case")]
                     pub enum #rust_name { #(#variants)* }
                 });
             }
@@ -100,7 +100,7 @@ fn emit_type_definitions(resolve: &Resolve, output: &mut TokenStream) {
                 output.extend(quote! {
                     #doc_attr
                     #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(rename_all = "kebab-case")]
+                    #[serde(rename_all = "snake_case")]
                     pub enum #flag_enum_name { #(#variants)* }
                     /// Set of flag values (serializes as a JSON array).
                     pub type #rust_name = Vec<#flag_enum_name>;
@@ -111,7 +111,7 @@ fn emit_type_definitions(resolve: &Resolve, output: &mut TokenStream) {
                 output.extend(quote! {
                     #doc_attr
                     #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(tag = "tag", content = "value", rename_all = "kebab-case")]
+                    #[serde(tag = "tag", content = "value", rename_all = "snake_case")]
                     pub enum #rust_name { #(#cases)* }
                 });
             }
