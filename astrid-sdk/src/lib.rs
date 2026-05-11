@@ -161,6 +161,29 @@ pub mod ipc {
         publish(topic, &json)
     }
 
+    /// Publish a UTF-8 string payload on behalf of a specific principal.
+    ///
+    /// Like [`publish`] but stamps the outgoing envelope with the supplied
+    /// `principal` instead of this capsule's. Reserved for uplinks
+    /// (`uplink = true` in `Capsule.toml [capabilities]`) — the host
+    /// returns an error for any other caller. The trust model is "trust
+    /// the uplink": the kernel does not verify that the uplink actually
+    /// authenticated the claimed principal. See issue #658.
+    pub fn publish_as(topic: &str, payload: &str, principal: &str) -> Result<(), SysError> {
+        wit_ipc::ipc_publish_as(topic, payload, principal).map_err(SysError::HostError)
+    }
+
+    /// Publish a JSON-serialized value on behalf of a specific principal.
+    /// See [`publish_as`].
+    pub fn publish_json_as<T: Serialize>(
+        topic: &str,
+        payload: &T,
+        principal: &str,
+    ) -> Result<(), SysError> {
+        let json = serde_json::to_string(payload)?;
+        publish_as(topic, &json, principal)
+    }
+
     /// Subscribe to an IPC topic. Returns a typed handle for polling/receiving.
     pub fn subscribe(topic: &str) -> Result<SubscriptionHandle, SysError> {
         let handle_id = wit_ipc::ipc_subscribe(topic).map_err(SysError::HostError)?;
