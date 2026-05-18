@@ -206,6 +206,20 @@ interface types {
         payload: string,
         /// UUID of the capsule that sent this message.
         source-id: string,
+        /// Principal attributed to the publisher of this message.
+        ///
+        /// For messages published via `ipc-publish`, this is the publishing
+        /// capsule's invocation principal (whoever the host attributed the
+        /// call to). For messages published via `ipc-publish-as`, this is
+        /// the principal the uplink claimed on behalf of an external caller.
+        ///
+        /// `none` for system / kernel-originated events that have no
+        /// attributable principal, and for legacy messages that predate
+        /// this field. Subscribers processing multi-message recv batches
+        /// should read this per-message rather than relying on the
+        /// invocation context (which only reflects the first message's
+        /// publisher).
+        principal: option<string>,
     }
 
     /// Pre-registered interceptor handle mapping.
