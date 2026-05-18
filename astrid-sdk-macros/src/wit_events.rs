@@ -2,7 +2,8 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use wit_parser::{Resolve, Type, TypeDefKind};
+use std::collections::BTreeMap;
+use wit_parser::{Resolve, Type, TypeDefKind, TypeOwner};
 
 /// Parse a WIT file or directory and generate Rust type definitions.
 ///
@@ -63,60 +64,109 @@ fn emit_include_strs(wit_files: &[std::path::PathBuf], output: &mut TokenStream)
     }
 }
 
-/// Generate Rust struct/enum definitions for all named types in the resolver.
+/// Generate Rust struct/enum definitions, one `pub mod <interface> { … }`
+/// per WIT interface. Per-interface namespacing prevents collisions
+/// across the canonical interface set — e.g. both `agent.wit` and
+/// `approval.wit` define `record response`, and both must produce a
+/// reachable `Response` struct.
 fn emit_type_definitions(resolve: &Resolve, output: &mut TokenStream) {
+    // Group types by their owning interface. `BTreeMap` so the macro
+    // output is deterministic across runs (HashMap iteration order
+    // would change every rebuild and turn the generated docs into a
+    // diff churn vector).
+    let mut by_interface: BTreeMap<String, Vec<TokenStream>> = BTreeMap::new();
+    let mut orphans: Vec<TokenStream> = Vec::new();
+
     for (_, type_def) in &resolve.types {
         let Some(ref name) = type_def.name else {
             continue;
         };
+        let Some(tokens) = type_tokens(resolve, name, type_def) else {
+            continue;
+        };
 
-        let rust_name = format_ident!("{}", kebab_to_pascal(name));
-        let doc_attr = case_doc_attr(&type_def.docs);
-
-        match &type_def.kind {
-            TypeDefKind::Record(record) => {
-                let fields = record_fields(resolve, record);
-                output.extend(quote! {
-                    #doc_attr
-                    #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(rename_all = "snake_case")]
-                    pub struct #rust_name {
-                        #(#fields)*
-                    }
-                });
+        match type_def.owner {
+            TypeOwner::Interface(iface_id) => {
+                let iface_name = resolve.interfaces[iface_id]
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "anon".to_string());
+                by_interface.entry(iface_name).or_default().push(tokens);
             }
-            TypeDefKind::Enum(enum_def) => {
-                let variants = enum_variants(enum_def);
-                output.extend(quote! {
-                    #doc_attr
-                    #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(rename_all = "snake_case")]
-                    pub enum #rust_name { #(#variants)* }
-                });
-            }
-            TypeDefKind::Flags(flags_def) => {
-                let variants = flags_variants(flags_def);
-                let flag_enum_name = format_ident!("{}Flag", kebab_to_pascal(name));
-                output.extend(quote! {
-                    #doc_attr
-                    #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(rename_all = "snake_case")]
-                    pub enum #flag_enum_name { #(#variants)* }
-                    /// Set of flag values (serializes as a JSON array).
-                    pub type #rust_name = Vec<#flag_enum_name>;
-                });
-            }
-            TypeDefKind::Variant(variant) => {
-                let cases = variant_cases(resolve, variant);
-                output.extend(quote! {
-                    #doc_attr
-                    #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-                    #[serde(tag = "tag", content = "value", rename_all = "snake_case")]
-                    pub enum #rust_name { #(#cases)* }
-                });
-            }
-            _ => {}
+            // Top-level (package-level) types fall through here. Rare —
+            // emitted at the parent module level to mirror the WIT shape.
+            _ => orphans.push(tokens),
         }
+    }
+
+    for tokens in orphans {
+        output.extend(tokens);
+    }
+    for (iface_name, items) in by_interface {
+        let mod_ident = format_ident!("{}", kebab_to_snake(&iface_name));
+        let doc = format!("Types generated from the `{iface_name}` WIT interface.");
+        output.extend(quote! {
+            #[doc = #doc]
+            pub mod #mod_ident {
+                #(#items)*
+            }
+        });
+    }
+}
+
+/// Build the token stream for a single named type definition, or
+/// `None` for kinds we don't emit (`type` aliases, resources, etc.).
+fn type_tokens(
+    resolve: &Resolve,
+    name: &str,
+    type_def: &wit_parser::TypeDef,
+) -> Option<TokenStream> {
+    let rust_name = format_ident!("{}", kebab_to_pascal(name));
+    let doc_attr = case_doc_attr(&type_def.docs);
+
+    match &type_def.kind {
+        TypeDefKind::Record(record) => {
+            let fields = record_fields(resolve, record);
+            Some(quote! {
+                #doc_attr
+                #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+                #[serde(rename_all = "snake_case")]
+                pub struct #rust_name {
+                    #(#fields)*
+                }
+            })
+        }
+        TypeDefKind::Enum(enum_def) => {
+            let variants = enum_variants(enum_def);
+            Some(quote! {
+                #doc_attr
+                #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+                #[serde(rename_all = "snake_case")]
+                pub enum #rust_name { #(#variants)* }
+            })
+        }
+        TypeDefKind::Flags(flags_def) => {
+            let variants = flags_variants(flags_def);
+            let flag_enum_name = format_ident!("{}Flag", kebab_to_pascal(name));
+            Some(quote! {
+                #doc_attr
+                #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+                #[serde(rename_all = "snake_case")]
+                pub enum #flag_enum_name { #(#variants)* }
+                /// Set of flag values (serializes as a JSON array).
+                pub type #rust_name = Vec<#flag_enum_name>;
+            })
+        }
+        TypeDefKind::Variant(variant) => {
+            let cases = variant_cases(resolve, variant);
+            Some(quote! {
+                #doc_attr
+                #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+                #[serde(tag = "tag", content = "value", rename_all = "snake_case")]
+                pub enum #rust_name { #(#cases)* }
+            })
+        }
+        _ => None,
     }
 }
 
@@ -252,7 +302,19 @@ fn wit_typedef_to_rust(resolve: &Resolve, type_def: &wit_parser::TypeDef) -> (To
         | TypeDefKind::Flags(_) => {
             let name = type_def.name.as_deref().unwrap_or("Unknown");
             let ident = format_ident!("{}", kebab_to_pascal(name));
-            (quote! { #ident }, false)
+            // Per-interface modules mean a struct in `llm` referencing
+            // `Message` (defined in `types`) needs a qualified path.
+            // The resolver tells us which interface owns the type;
+            // emit `super::<iface>::<Name>` so the reference resolves
+            // from inside the consuming module.
+            if let TypeOwner::Interface(iface_id) = type_def.owner
+                && let Some(ref iface_name) = resolve.interfaces[iface_id].name
+            {
+                let mod_ident = format_ident!("{}", kebab_to_snake(iface_name));
+                (quote! { super::#mod_ident::#ident }, false)
+            } else {
+                (quote! { #ident }, false)
+            }
         }
         _ => (quote! { ::serde_json::Value }, false),
     }
