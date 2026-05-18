@@ -9,6 +9,12 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+### Added
+
+- **`Message::principal: Option<String>`** on `astrid_sdk::ipc::Message`. Surfaces the publisher's principal per-message so subscribers processing multi-message `recv` batches can route / log / authorize correctly without relying on the invocation-context shortcut (which only reflects the first message's publisher — see kernel PR #735). Populated by the host based on caller context for `ipc-publish` and the claimed principal for `ipc-publish-as`. `None` for system events with no attributable principal and for legacy messages. Canonical WIT change: `unicity-astrid/wit#4`; kernel-side host stamping ships in a separate follow-up PR.
+
+- **`#[non_exhaustive]` on `astrid_sdk::ipc::Message`.** Future field additions to the IPC envelope won't break consumers doing exhaustive struct destructuring (`let Message { topic, payload, .. } = msg;` continues to work; `let Message { topic, payload, source_id, principal } = msg;` does not — use `..` instead). Reading individual fields is unaffected. The SDK is the only legitimate publisher of `Message`; direct construction outside the crate is no longer supported. No known external consumers today.
+
 ## [0.6.1] - 2026-05-19
 
 ### Added

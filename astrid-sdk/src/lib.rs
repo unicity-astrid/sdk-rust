@@ -195,7 +195,13 @@ pub mod ipc {
     }
 
     /// A message received from the IPC bus.
+    ///
+    /// Marked `#[non_exhaustive]` so future field additions don't break
+    /// downstream code that exhaustively destructures the struct. Read
+    /// individual fields freely; construct via the SDK rather than
+    /// directly (the SDK is the only legitimate publisher).
     #[derive(Debug, Clone)]
+    #[non_exhaustive]
     pub struct Message {
         /// The topic this message was published on.
         pub topic: String,
@@ -203,6 +209,19 @@ pub mod ipc {
         pub payload: String,
         /// UUID of the capsule that published this message.
         pub source_id: String,
+        /// Principal attributed to the publisher of this message.
+        ///
+        /// For messages published via [`publish`], this is the publishing
+        /// capsule's invocation principal. For messages published via
+        /// [`publish_as`], this is the principal the uplink claimed.
+        ///
+        /// `None` for system / kernel-originated events that have no
+        /// attributable principal, and for legacy messages that predate
+        /// this field. Subscribers processing multi-message batches
+        /// (`PollResult::messages`) should read this per-message rather
+        /// than relying on [`crate::runtime::caller`], which only reflects
+        /// the first message's publisher.
+        pub principal: Option<String>,
     }
 
     /// Result of polling or receiving from an IPC subscription.
@@ -239,6 +258,7 @@ pub mod ipc {
                     topic: m.topic,
                     payload: m.payload,
                     source_id: m.source_id,
+                    principal: m.principal,
                 })
                 .collect(),
             dropped: envelope.dropped,
