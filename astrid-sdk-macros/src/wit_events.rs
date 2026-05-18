@@ -310,7 +310,7 @@ fn wit_typedef_to_rust(resolve: &Resolve, type_def: &wit_parser::TypeDef) -> (To
             if let TypeOwner::Interface(iface_id) = type_def.owner
                 && let Some(ref iface_name) = resolve.interfaces[iface_id].name
             {
-                let mod_ident = format_ident!("{}", iface_name.replace('-', "_"));
+                let mod_ident = format_ident!("{}", kebab_to_snake(iface_name));
                 (quote! { super::#mod_ident::#ident }, false)
             } else {
                 (quote! { #ident }, false)
