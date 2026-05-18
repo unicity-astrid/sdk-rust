@@ -9,6 +9,10 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+### Changed
+
+- **`astrid-sys/wit/astrid-capsule.wit` is now sourced from `unicity-astrid/wit`.** The host ABI lived as an unsynced copy in three repos (kernel, sdk-rust, sdk-js). PR `unicity-astrid/wit#3` made `unicity-astrid/wit` the canonical home (new `host/astrid-capsule.wit` path). This repo's `contracts/` submodule pointer is bumped to that commit, and `astrid-sys/wit/astrid-capsule.wit` is now a sync artifact maintained by `scripts/sync-host-wit.sh`. Because `astrid-sys` publishes to crates.io and `cargo package` can only include files inside the crate dir, the file has to physically live where it does — but the canonical source is the submodule, and a new CI job (`wit-sync`) runs `scripts/sync-host-wit.sh --check` to fail drift. Bumps the in-crate WIT to include `ipc-publish-as` (previously only on `feat/ipc-publish-as` branch), which means the `wit-bindgen`-generated `astrid_sys::astrid::capsule::ipc::ipc_publish_as` binding is now available to guests on `main` — the Rust SDK wrapper (`astrid_sdk::ipc::publish_as`) still needs the host-side implementation to land before it can be reintroduced.
+
 ## [0.6.0] - 2026-04-10
 
 ### Breaking
