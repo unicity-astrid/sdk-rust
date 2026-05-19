@@ -153,3 +153,147 @@ pub fn send(stream: &StreamHandle, data: &[u8]) -> Result<(), SendError> {
 pub fn close(stream: &StreamHandle) -> Result<(), SysError> {
     wit_net::net_close_stream(stream.0).map_err(SysError::HostError)
 }
+
+/// Open an outbound TCP connection to `host:port` and return a stream handle.
+///
+/// The capsule's `Capsule.toml` must declare a `net_connect` allowlist entry
+/// matching `host:port` (exact `"host:port"` or `"host:*"`); missing or empty
+/// allowlist denies all outbound TCP. The kernel runs the same SSRF airlock
+/// used by `http-request` on the resolved IP and enforces a connect timeout
+/// (10s default).
+///
+/// The returned handle flows through the same [`send`] / [`recv`] / [`try_recv`]
+/// / [`close`] surface as a handle from [`accept`]. For a `std::net::TcpStream`-
+/// shaped facade with [`std::io::Read`] / [`std::io::Write`], see [`TcpStream`].
+pub fn connect(host: &str, port: u16) -> Result<StreamHandle, SysError> {
+    let handle = wit_net::net_connect_tcp(host, port).map_err(SysError::HostError)?;
+    Ok(StreamHandle(handle))
+}
+
+/// A connected TCP stream — the SDK analogue of [`std::net::TcpStream`].
+///
+/// Owns a [`StreamHandle`] from [`connect`] (or [`accept`]) and implements
+/// [`std::io::Read`] and [`std::io::Write`] so generic code that operates on
+/// any `Read + Write` (TLS clients, WebSocket libraries, Postgres drivers)
+/// works unmodified.
+///
+/// The host closes the underlying stream when this value is dropped, so
+/// `TcpStream` is RAII — no explicit close required.
+///
+/// # Example
+///
+/// ```no_run
+/// use astrid_sdk::net::TcpStream;
+/// use std::io::{Read, Write};
+///
+/// let mut sock = TcpStream::connect("fulcrum.unicity.network:443")?;
+/// sock.write_all(b"hello")?;
+///
+/// let mut buf = vec![0u8; 4096];
+/// let n = sock.read(&mut buf)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+#[derive(Debug)]
+pub struct TcpStream {
+    handle: StreamHandle,
+    /// Per-stream read buffer for the byte-stream [`std::io::Read`] facade.
+    /// The host-side frame may be larger than the caller's `read` buffer;
+    /// the surplus stays here until the next call consumes it.
+    read_residual: Vec<u8>,
+}
+
+impl TcpStream {
+    /// Open a TCP connection to `addr`, formatted as `"host:port"`.
+    ///
+    /// DNS resolution and the SSRF airlock run host-side; the WASM guest
+    /// only sees the parsed host and port.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] wrapping the host-side failure
+    /// (capability denial, SSRF rejection, DNS failure, connect timeout,
+    /// or remote refusal).
+    pub fn connect<A: AsRef<str>>(addr: A) -> std::io::Result<Self> {
+        let (host, port) = parse_host_port(addr.as_ref())?;
+        let handle = connect(host, port).map_err(io_error_from_sys)?;
+        Ok(Self { handle, read_residual: Vec::new() })
+    }
+
+    /// Wrap an existing [`StreamHandle`] (e.g. one returned by [`accept`])
+    /// in the `TcpStream` facade. The `TcpStream` takes ownership and will
+    /// close the handle on drop.
+    #[must_use]
+    pub fn from_handle(handle: StreamHandle) -> Self {
+        Self { handle, read_residual: Vec::new() }
+    }
+
+    /// The raw stream handle. Use [`send`] / [`recv`] directly if you need
+    /// the frame-oriented API instead of `Read + Write`.
+    #[must_use]
+    pub fn handle(&self) -> &StreamHandle {
+        &self.handle
+    }
+}
+
+impl std::io::Read for TcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.read_residual.is_empty() {
+            let n = buf.len().min(self.read_residual.len());
+            buf[..n].copy_from_slice(&self.read_residual[..n]);
+            self.read_residual.drain(..n);
+            return Ok(n);
+        }
+        match recv(&self.handle) {
+            Ok(frame) => {
+                let n = buf.len().min(frame.len());
+                buf[..n].copy_from_slice(&frame[..n]);
+                if n < frame.len() {
+                    self.read_residual = frame[n..].to_vec();
+                }
+                Ok(n)
+            }
+            // Peer disconnect is EOF in the std Read contract.
+            Err(RecvError) => Ok(0),
+        }
+    }
+}
+
+impl std::io::Write for TcpStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        send(&self.handle, buf).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stream closed")
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // The host writes are non-buffered at the SDK layer.
+        Ok(())
+    }
+}
+
+impl Drop for TcpStream {
+    fn drop(&mut self) {
+        let _ = close(&self.handle);
+    }
+}
+
+fn parse_host_port(addr: &str) -> std::io::Result<(&str, u16)> {
+    let (host, port_str) = addr.rsplit_once(':').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "address must be \"host:port\"",
+        )
+    })?;
+    let port = port_str.parse::<u16>().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid port: {e}"),
+        )
+    })?;
+    Ok((host, port))
+}
+
+fn io_error_from_sys(err: SysError) -> std::io::Error {
+    std::io::Error::other(err.to_string())
+}
