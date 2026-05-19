@@ -9,6 +9,10 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+### Added
+
+- **`astrid_sdk::net::connect(host, port)` + `astrid_sdk::net::TcpStream`** — outbound TCP. `connect` is the low-level call returning a `StreamHandle`, parallel to the existing `accept`. `TcpStream` is the `std::net::TcpStream`-shaped facade with `std::io::Read + Write` impls and RAII close-on-drop; user code generally writes `TcpStream::connect("host:port")`. Underlying ABI is the new `astrid:capsule/net.net-connect-tcp` host fn ([wit#5](https://github.com/unicity-astrid/wit/pull/5)); capability-gated against a per-capsule `net_connect` allowlist in `Capsule.toml` (kernel-side, separate PR). SSRF airlock runs on the resolved IP, matching the gate on `http-request`. Unblocks WebSocket, MQTT, Discord/Telegram, postgres/redis, etc. Tracking issue: [astrid#745](https://github.com/unicity-astrid/astrid/issues/745). RFC: [rfcs#27](https://github.com/unicity-astrid/rfcs/pull/27).
+
 ## [0.6.1] - 2026-05-19
 
 ### Added
