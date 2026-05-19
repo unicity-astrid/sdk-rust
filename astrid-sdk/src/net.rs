@@ -563,8 +563,7 @@ mod tests {
     fn to_host_timeout_passes_through() {
         assert_eq!(to_host_timeout(None).unwrap(), None);
         assert_eq!(
-            to_host_timeout(Some(std::time::Duration::from_millis(500)))
-                .unwrap(),
+            to_host_timeout(Some(std::time::Duration::from_millis(500))).unwrap(),
             Some(500)
         );
     }
