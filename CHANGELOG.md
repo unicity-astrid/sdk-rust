@@ -9,6 +9,10 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+### Removed
+
+- **`astrid_sdk::net::{recv, try_recv, send}` + `RecvError` / `TryRecvError` / `SendError`.** Thin convenience wrappers around the host-side framed `net-read` / `net-write` fns, which themselves baked length-prefix framing into the host ABI. Length-prefixed framing is application-layer (`std::net::TcpStream` doesn't ship it, the OS doesn't ship it), so the host fns are being removed too. Capsules that need length-prefix framing build a small state machine on top of `net::read_bytes` / `net::write_bytes`. **Breaking**: the only known consumer is the Astrid CLI proxy capsule, which gets its own user-space framing module in [`unicity-astrid/capsule-cli`](https://github.com/unicity-astrid/capsule-cli).
+
 ### Added
 
 - **`astrid_sdk::net::connect(host, port)` + `astrid_sdk::net::TcpStream`** — outbound TCP. `connect` is the low-level call returning a `StreamHandle`, parallel to the existing `accept`. `TcpStream` is the `std::net::TcpStream`-shaped facade with `std::io::Read + Write` impls and RAII close-on-drop; user code generally writes `TcpStream::connect("host:port")`. Underlying ABI is the new `astrid:capsule/net.net-connect-tcp` host fn ([wit#5](https://github.com/unicity-astrid/wit/pull/5)); capability-gated against a per-capsule `net_connect` allowlist in `Capsule.toml` (kernel-side, separate PR). SSRF airlock runs on the resolved IP, matching the gate on `http-request`. Unblocks WebSocket, MQTT, Discord/Telegram, postgres/redis, etc. Tracking issue: [astrid#745](https://github.com/unicity-astrid/astrid/issues/745). RFC: [rfcs#27](https://github.com/unicity-astrid/rfcs/pull/27).
