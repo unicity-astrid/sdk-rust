@@ -154,6 +154,22 @@ pub fn close(stream: &StreamHandle) -> Result<(), SysError> {
     wit_net::net_close_stream(stream.0).map_err(SysError::HostError)
 }
 
+// ---------------------------------------------------------------------------
+// Outbound TCP — std::net::TcpStream parity
+// ---------------------------------------------------------------------------
+
+/// Direction argument for [`TcpStream::shutdown`] — mirror of
+/// [`std::net::Shutdown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// Half-close the read side.
+    Read,
+    /// Half-close the write side.
+    Write,
+    /// Close both directions.
+    Both,
+}
+
 /// Open an outbound TCP connection to `host:port` and return a stream handle.
 ///
 /// The capsule's `Capsule.toml` must declare a `net_connect` allowlist entry
@@ -162,20 +178,116 @@ pub fn close(stream: &StreamHandle) -> Result<(), SysError> {
 /// used by `http-request` on the resolved IP and enforces a connect timeout
 /// (10s default).
 ///
-/// The returned handle flows through the same [`send`] / [`recv`] / [`try_recv`]
-/// / [`close`] surface as a handle from [`accept`]. For a `std::net::TcpStream`-
-/// shaped facade with [`std::io::Read`] / [`std::io::Write`], see [`TcpStream`].
+/// The returned handle flows through the byte-stream surface
+/// ([`read_bytes`] / [`write_bytes`] / [`close`]) and the std-shaped
+/// [`TcpStream`] facade. The frame-oriented [`recv`] / [`send`] also work
+/// but are intended for the inbound Unix-accept proxy use case.
 pub fn connect(host: &str, port: u16) -> Result<StreamHandle, SysError> {
     let handle = wit_net::net_connect_tcp(host, port).map_err(SysError::HostError)?;
     Ok(StreamHandle(handle))
 }
 
+/// Read up to `max_bytes` from `stream` without length-prefix framing.
+///
+/// Mirrors `std::io::Read::read`. Empty result means EOF (peer
+/// disconnected). Honours any read timeout previously set via
+/// [`set_read_timeout`].
+pub fn read_bytes(stream: &StreamHandle, max_bytes: u32) -> Result<Vec<u8>, SysError> {
+    wit_net::net_read_bytes(stream.0, max_bytes).map_err(SysError::HostError)
+}
+
+/// Write `data` to `stream` without framing. Returns the number of bytes
+/// actually written (may be less than `data.len()`). Honours any write
+/// timeout previously set via [`set_write_timeout`].
+pub fn write_bytes(stream: &StreamHandle, data: &[u8]) -> Result<u32, SysError> {
+    wit_net::net_write_bytes(stream.0, data).map_err(SysError::HostError)
+}
+
+/// Peek up to `max_bytes` without consuming them — the next
+/// [`read_bytes`] returns the same data again.
+pub fn peek(stream: &StreamHandle, max_bytes: u32) -> Result<Vec<u8>, SysError> {
+    wit_net::net_peek(stream.0, max_bytes).map_err(SysError::HostError)
+}
+
+/// Half-close the read side, write side, or both.
+pub fn shutdown(stream: &StreamHandle, how: Shutdown) -> Result<(), SysError> {
+    let wit_how = match how {
+        Shutdown::Read => wit_types::ShutdownHow::Read,
+        Shutdown::Write => wit_types::ShutdownHow::Write,
+        Shutdown::Both => wit_types::ShutdownHow::Both,
+    };
+    wit_net::net_shutdown(stream.0, wit_how).map_err(SysError::HostError)
+}
+
+/// Remote peer address, formatted as `"ip:port"`.
+pub fn peer_addr(stream: &StreamHandle) -> Result<String, SysError> {
+    wit_net::net_peer_addr(stream.0).map_err(SysError::HostError)
+}
+
+/// Local socket address, formatted as `"ip:port"`.
+pub fn local_addr(stream: &StreamHandle) -> Result<String, SysError> {
+    wit_net::net_local_addr(stream.0).map_err(SysError::HostError)
+}
+
+/// Toggle `TCP_NODELAY` (Nagle off when `true`).
+pub fn set_nodelay(stream: &StreamHandle, nodelay: bool) -> Result<(), SysError> {
+    wit_net::net_set_nodelay(stream.0, nodelay).map_err(SysError::HostError)
+}
+
+/// Current `TCP_NODELAY` setting.
+pub fn nodelay(stream: &StreamHandle) -> Result<bool, SysError> {
+    wit_net::net_nodelay(stream.0).map_err(SysError::HostError)
+}
+
+/// Set the read timeout. `None` clears it.
+pub fn set_read_timeout(
+    stream: &StreamHandle,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), SysError> {
+    let ms = timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    wit_net::net_set_read_timeout(stream.0, ms).map_err(SysError::HostError)
+}
+
+/// Current read timeout, or `None` if unset.
+pub fn read_timeout(stream: &StreamHandle) -> Result<Option<std::time::Duration>, SysError> {
+    Ok(wit_net::net_read_timeout(stream.0)
+        .map_err(SysError::HostError)?
+        .map(std::time::Duration::from_millis))
+}
+
+/// Set the write timeout. `None` clears it.
+pub fn set_write_timeout(
+    stream: &StreamHandle,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), SysError> {
+    let ms = timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    wit_net::net_set_write_timeout(stream.0, ms).map_err(SysError::HostError)
+}
+
+/// Current write timeout, or `None` if unset.
+pub fn write_timeout(stream: &StreamHandle) -> Result<Option<std::time::Duration>, SysError> {
+    Ok(wit_net::net_write_timeout(stream.0)
+        .map_err(SysError::HostError)?
+        .map(std::time::Duration::from_millis))
+}
+
+/// Set the IP TTL on outgoing packets.
+pub fn set_ttl(stream: &StreamHandle, ttl: u32) -> Result<(), SysError> {
+    wit_net::net_set_ttl(stream.0, ttl).map_err(SysError::HostError)
+}
+
+/// Current IP TTL.
+pub fn ttl(stream: &StreamHandle) -> Result<u32, SysError> {
+    wit_net::net_ttl(stream.0).map_err(SysError::HostError)
+}
+
 /// A connected TCP stream — the SDK analogue of [`std::net::TcpStream`].
 ///
-/// Owns a [`StreamHandle`] from [`connect`] (or [`accept`]) and implements
-/// [`std::io::Read`] and [`std::io::Write`] so generic code that operates on
-/// any `Read + Write` (TLS clients, WebSocket libraries, Postgres drivers)
-/// works unmodified.
+/// Owns a [`StreamHandle`] from [`connect`] and implements
+/// [`std::io::Read`] and [`std::io::Write`] over the host's byte-stream
+/// `net-read-bytes` / `net-write-bytes` (no length-prefix framing). Generic
+/// code that operates on any `Read + Write` (TLS clients, WebSocket
+/// libraries, Postgres drivers) works unmodified.
 ///
 /// The host closes the underlying stream when this value is dropped, so
 /// `TcpStream` is RAII — no explicit close required.
@@ -187,7 +299,8 @@ pub fn connect(host: &str, port: u16) -> Result<StreamHandle, SysError> {
 /// use std::io::{Read, Write};
 ///
 /// let mut sock = TcpStream::connect("fulcrum.unicity.network:443")?;
-/// sock.write_all(b"hello")?;
+/// sock.set_nodelay(true)?;
+/// sock.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")?;
 ///
 /// let mut buf = vec![0u8; 4096];
 /// let n = sock.read(&mut buf)?;
@@ -196,10 +309,6 @@ pub fn connect(host: &str, port: u16) -> Result<StreamHandle, SysError> {
 #[derive(Debug)]
 pub struct TcpStream {
     handle: StreamHandle,
-    /// Per-stream read buffer for the byte-stream [`std::io::Read`] facade.
-    /// The host-side frame may be larger than the caller's `read` buffer;
-    /// the surplus stays here until the next call consumes it.
-    read_residual: Vec<u8>,
 }
 
 impl TcpStream {
@@ -216,54 +325,103 @@ impl TcpStream {
     pub fn connect<A: AsRef<str>>(addr: A) -> std::io::Result<Self> {
         let (host, port) = parse_host_port(addr.as_ref())?;
         let handle = connect(host, port).map_err(io_error_from_sys)?;
-        Ok(Self { handle, read_residual: Vec::new() })
+        Ok(Self { handle })
     }
 
-    /// Wrap an existing [`StreamHandle`] (e.g. one returned by [`accept`])
-    /// in the `TcpStream` facade. The `TcpStream` takes ownership and will
-    /// close the handle on drop.
+    /// Wrap an existing [`StreamHandle`] in the `TcpStream` facade. The
+    /// `TcpStream` takes ownership and will close the handle on drop.
     #[must_use]
     pub fn from_handle(handle: StreamHandle) -> Self {
-        Self { handle, read_residual: Vec::new() }
+        Self { handle }
     }
 
-    /// The raw stream handle. Use [`send`] / [`recv`] directly if you need
-    /// the frame-oriented API instead of `Read + Write`.
+    /// The raw stream handle. Use the free functions in this module if you
+    /// need the byte-stream surface directly.
     #[must_use]
     pub fn handle(&self) -> &StreamHandle {
         &self.handle
+    }
+
+    /// Set the `TCP_NODELAY` socket option (Nagle's algorithm off when `true`).
+    pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
+        set_nodelay(&self.handle, nodelay).map_err(io_error_from_sys)
+    }
+
+    /// Read the current `TCP_NODELAY` setting.
+    pub fn nodelay(&self) -> std::io::Result<bool> {
+        nodelay(&self.handle).map_err(io_error_from_sys)
+    }
+
+    /// Set the read timeout. `None` clears it.
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+        set_read_timeout(&self.handle, timeout).map_err(io_error_from_sys)
+    }
+
+    /// Current read timeout.
+    pub fn read_timeout(&self) -> std::io::Result<Option<std::time::Duration>> {
+        read_timeout(&self.handle).map_err(io_error_from_sys)
+    }
+
+    /// Set the write timeout. `None` clears it.
+    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+        set_write_timeout(&self.handle, timeout).map_err(io_error_from_sys)
+    }
+
+    /// Current write timeout.
+    pub fn write_timeout(&self) -> std::io::Result<Option<std::time::Duration>> {
+        write_timeout(&self.handle).map_err(io_error_from_sys)
+    }
+
+    /// Set the IP `TTL` on outgoing packets.
+    pub fn set_ttl(&self, ttl_val: u32) -> std::io::Result<()> {
+        set_ttl(&self.handle, ttl_val).map_err(io_error_from_sys)
+    }
+
+    /// Current IP `TTL`.
+    pub fn ttl(&self) -> std::io::Result<u32> {
+        ttl(&self.handle).map_err(io_error_from_sys)
+    }
+
+    /// Remote peer address as `"ip:port"`.
+    pub fn peer_addr(&self) -> std::io::Result<String> {
+        peer_addr(&self.handle).map_err(io_error_from_sys)
+    }
+
+    /// Local socket address as `"ip:port"`.
+    pub fn local_addr(&self) -> std::io::Result<String> {
+        local_addr(&self.handle).map_err(io_error_from_sys)
+    }
+
+    /// Half-close the read side, write side, or both.
+    pub fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        shutdown(&self.handle, how).map_err(io_error_from_sys)
+    }
+
+    /// Peek up to `buf.len()` bytes without consuming them. Returns the
+    /// number of bytes written into `buf`.
+    pub fn peek(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let bytes = peek(&self.handle, max).map_err(io_error_from_sys)?;
+        let n = buf.len().min(bytes.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
     }
 }
 
 impl std::io::Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if !self.read_residual.is_empty() {
-            let n = buf.len().min(self.read_residual.len());
-            buf[..n].copy_from_slice(&self.read_residual[..n]);
-            self.read_residual.drain(..n);
-            return Ok(n);
-        }
-        match recv(&self.handle) {
-            Ok(frame) => {
-                let n = buf.len().min(frame.len());
-                buf[..n].copy_from_slice(&frame[..n]);
-                if n < frame.len() {
-                    self.read_residual = frame[n..].to_vec();
-                }
-                Ok(n)
-            }
-            // Peer disconnect is EOF in the std Read contract.
-            Err(RecvError) => Ok(0),
-        }
+        let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let bytes = read_bytes(&self.handle, max).map_err(io_error_from_sys)?;
+        let n = buf.len().min(bytes.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
     }
 }
 
 impl std::io::Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        send(&self.handle, buf).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stream closed")
-        })?;
-        Ok(buf.len())
+        let n = write_bytes(&self.handle, buf).map_err(io_error_from_sys)?;
+        Ok(n as usize)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
