@@ -9,6 +9,12 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-19
+
+### Added
+
+- **`ipc::publish_as(topic, payload, principal)` and `ipc::publish_json_as`.** SDK helpers for uplink principal propagation. Without these, an uplink that fans inbound socket messages onto the bus stamps every published event with its own (capsule-owner) principal — the kernel's Layer 5/6 enforcement preamble would then see `caller = default` regardless of which agent the operator was impersonating via the local CLI, and `astrid agent switch alice; astrid agent disable bob` would silently succeed as default. Uplink capsules (CLI proxy, future Telegram/Discord bridges) can now claim a principal other than their own at the IPC boundary. Gated host-side by an `uplink: bool` capability — non-uplink capsules calling these get a clear error. (#37)
+
 ### Changed
 
 - **`astrid-sdk/wit/astrid-contracts.wit` is now sourced from `unicity-astrid/wit`.** The contract types (`astrid_sdk::contracts::*`) were generated from a hand-maintained bundled WIT that drifted from the canonical `unicity-astrid/wit` repo — 9 of 17 interfaces present, 33 of 71 records. With sdk-js coming online, having two SDKs generate types from independent WIT copies would have meant cross-SDK contract drift the moment the canonical repo added or changed a record. Now:
@@ -16,13 +22,16 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
   - The sync transforms the per-package canonical layout (`package astrid:context@1.0.0;` etc.) into the single-package bundled layout the `wit_events!` macro consumes (`package astrid:contracts@1.0.0;`). Cross-package `use astrid:types/types.{…};` references become same-package `use types.{…};`.
   - New CI job step runs `scripts/sync-contracts-wit.sh --check`. Drift fails CI.
   - `wit_events!` now emits one `pub mod <interface> { … }` per WIT interface instead of flat top-level types. Required because the canonical interface set has same-named records across packages (e.g. `agent::response`, `approval::response`, `elicit::response`); without per-interface namespacing they collided. Type references across interfaces are emitted as fully-qualified `super::<iface>::<Name>` paths.
-  - **Breaking** (technical): if anything was using flat `astrid_sdk::contracts::CompactRequest`, it's now `astrid_sdk::contracts::context::CompactRequest`. No known consumer today — capsule code hand-rolls equivalent structs and is being migrated separately.
+  - **Breaking** (technical): if anything was using flat `astrid_sdk::contracts::CompactRequest`, it's now `astrid_sdk::contracts::context::CompactRequest`. No known consumer today — capsule code hand-rolls equivalent structs and is being migrated separately. (#39)
 
 - **`astrid-sys/wit/astrid-capsule.wit` is now sourced from `unicity-astrid/wit`.** The host ABI lived as an unsynced copy in three repos (kernel, sdk-rust, sdk-js); PR `unicity-astrid/wit#3` made `unicity-astrid/wit` the canonical home (new `host/astrid-capsule.wit` path).
   - This repo's `contracts/` submodule pointer is bumped to that commit.
   - `astrid-sys/wit/astrid-capsule.wit` becomes a sync artifact maintained by `scripts/sync-host-wit.sh`. Can't go away entirely because `astrid-sys` publishes to crates.io and `cargo package` only bundles files inside the crate dir — but the submodule is authoritative.
-  - New CI job `wit-sync` runs `scripts/sync-host-wit.sh --check` on every push/PR. Drift between `contracts/host/` and `astrid-sys/wit/` fails CI.
-  - Bumps the in-crate WIT to include `ipc-publish-as` (previously only on `feat/ipc-publish-as`). The `wit-bindgen`-generated `astrid_sys::astrid::capsule::ipc::ipc_publish_as` binding is now available to guests on `main`. The Rust SDK wrapper (`astrid_sdk::ipc::publish_as`) still needs the host-side implementation to land before it can be reintroduced.
+  - New CI job `wit-sync` runs `scripts/sync-host-wit.sh --check` on every push/PR. Drift between `contracts/host/` and `astrid-sys/wit/` fails CI. (#38)
+
+### Fixed
+
+- **`cargo publish -p astrid-sys` now works.** The WIT file lived outside the crate directory (`../wit/astrid-capsule.wit`), which `cargo package` strips and `cargo publish` rejects. WIT files moved into their respective crate dirs (`astrid-sys/wit/`, `astrid-sdk/wit/`), root `wit/` directory removed, `include` directive added to `astrid-sys/Cargo.toml`. (#36)
 
 ## [0.6.0] - 2026-04-10
 
