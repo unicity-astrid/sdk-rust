@@ -239,12 +239,28 @@ pub fn nodelay(stream: &StreamHandle) -> Result<bool, SysError> {
     wit_net::net_nodelay(stream.0).map_err(SysError::HostError)
 }
 
-/// Set the read timeout. `None` clears it.
+/// Validate + convert a timeout to milliseconds for the host fn.
+///
+/// Mirrors `std::net::TcpStream::set_read_timeout` /
+/// `set_write_timeout`, which both reject `Some(Duration::ZERO)` —
+/// zero would be ambiguous with "no timeout".
+fn to_host_timeout(timeout: Option<std::time::Duration>) -> Result<Option<u64>, SysError> {
+    match timeout {
+        Some(d) if d.is_zero() => Err(SysError::HostError(
+            "timeout must be non-zero (use None to clear)".into(),
+        )),
+        Some(d) => Ok(Some(u64::try_from(d.as_millis()).unwrap_or(u64::MAX))),
+        None => Ok(None),
+    }
+}
+
+/// Set the read timeout. `None` clears it; `Some(Duration::ZERO)` is
+/// rejected (matches `std::net::TcpStream::set_read_timeout`).
 pub fn set_read_timeout(
     stream: &StreamHandle,
     timeout: Option<std::time::Duration>,
 ) -> Result<(), SysError> {
-    let ms = timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let ms = to_host_timeout(timeout)?;
     wit_net::net_set_read_timeout(stream.0, ms).map_err(SysError::HostError)
 }
 
@@ -255,12 +271,13 @@ pub fn read_timeout(stream: &StreamHandle) -> Result<Option<std::time::Duration>
         .map(std::time::Duration::from_millis))
 }
 
-/// Set the write timeout. `None` clears it.
+/// Set the write timeout. `None` clears it; `Some(Duration::ZERO)` is
+/// rejected (matches `std::net::TcpStream::set_write_timeout`).
 pub fn set_write_timeout(
     stream: &StreamHandle,
     timeout: Option<std::time::Duration>,
 ) -> Result<(), SysError> {
-    let ms = timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let ms = to_host_timeout(timeout)?;
     wit_net::net_set_write_timeout(stream.0, ms).map_err(SysError::HostError)
 }
 
@@ -398,10 +415,13 @@ impl TcpStream {
     }
 
     /// Peek up to `buf.len()` bytes without consuming them. Returns the
-    /// number of bytes written into `buf`.
+    /// number of bytes written into `buf`. `Ok(0)` is EOF (matches
+    /// `std::net::TcpStream::peek`). If a read timeout is set and it
+    /// expires with no data, returns
+    /// [`std::io::ErrorKind::WouldBlock`].
     pub fn peek(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let bytes = peek(&self.handle, max).map_err(io_error_from_sys)?;
+        let bytes = peek(&self.handle, max).map_err(io_error_from_net_op)?;
         let n = buf.len().min(bytes.len());
         buf[..n].copy_from_slice(&bytes[..n]);
         Ok(n)
@@ -411,7 +431,7 @@ impl TcpStream {
 impl std::io::Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let bytes = read_bytes(&self.handle, max).map_err(io_error_from_sys)?;
+        let bytes = read_bytes(&self.handle, max).map_err(io_error_from_net_op)?;
         let n = buf.len().min(bytes.len());
         buf[..n].copy_from_slice(&bytes[..n]);
         Ok(n)
@@ -420,7 +440,7 @@ impl std::io::Read for TcpStream {
 
 impl std::io::Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = write_bytes(&self.handle, buf).map_err(io_error_from_sys)?;
+        let n = write_bytes(&self.handle, buf).map_err(io_error_from_net_op)?;
         Ok(n as usize)
     }
 
@@ -436,22 +456,128 @@ impl Drop for TcpStream {
     }
 }
 
+/// Parse `"host:port"` for [`TcpStream::connect`]. Strips IPv6 square
+/// brackets — `[::1]:443` → `("::1", 443)` — because the host fn takes
+/// a raw hostname/IP without brackets (matching `tokio::net::lookup_host`
+/// and `std`'s `(&str, u16)` `ToSocketAddrs` impl).
 fn parse_host_port(addr: &str) -> std::io::Result<(&str, u16)> {
+    // IPv6 literal in `[v6]:port` form — split on the closing bracket
+    // so a v6 address with internal colons doesn't fool `rsplit_once`.
+    if let Some(end) = addr.strip_prefix('[') {
+        let (v6, rest) = end.split_once(']').ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing closing `]` in IPv6 address",
+            )
+        })?;
+        let port_str = rest.strip_prefix(':').ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IPv6 address must be followed by `:port`",
+            )
+        })?;
+        let port = parse_port(port_str)?;
+        return Ok((v6, port));
+    }
     let (host, port_str) = addr.rsplit_once(':').ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "address must be \"host:port\"",
         )
     })?;
-    let port = port_str.parse::<u16>().map_err(|e| {
+    Ok((host, parse_port(port_str)?))
+}
+
+fn parse_port(port_str: &str) -> std::io::Result<u16> {
+    port_str.parse::<u16>().map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("invalid port: {e}"),
         )
-    })?;
-    Ok((host, port))
+    })
 }
 
 fn io_error_from_sys(err: SysError) -> std::io::Error {
     std::io::Error::other(err.to_string())
+}
+
+/// `io::Error` from a network-op `SysError`, mapping the host's
+/// `"... would block"` sentinel to [`std::io::ErrorKind::WouldBlock`]
+/// so std-style callers (`Read::read`, `Write::write`, `peek`) can
+/// distinguish "timeout fired, retry" from a real EOF or transport
+/// error.
+fn io_error_from_net_op(err: SysError) -> std::io::Error {
+    let msg = err.to_string();
+    if msg.contains("would block") {
+        std::io::Error::new(std::io::ErrorKind::WouldBlock, msg)
+    } else {
+        std::io::Error::other(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_host_port_basic() {
+        let (h, p) = parse_host_port("example.com:443").unwrap();
+        assert_eq!((h, p), ("example.com", 443));
+    }
+
+    #[test]
+    fn parse_host_port_strips_ipv6_brackets() {
+        let (h, p) = parse_host_port("[::1]:443").unwrap();
+        assert_eq!((h, p), ("::1", 443));
+        let (h, p) = parse_host_port("[2001:db8::1]:8080").unwrap();
+        assert_eq!((h, p), ("2001:db8::1", 8080));
+    }
+
+    #[test]
+    fn parse_host_port_ipv6_without_brackets_fails_cleanly() {
+        // `2001:db8::1:443` is ambiguous (no brackets, multiple colons).
+        // rsplit_once takes the last colon — the port parse then fails
+        // because `:1` precedes it. We accept this; brackets are the
+        // unambiguous form.
+        assert!(parse_host_port("2001:db8::1:abc").is_err());
+    }
+
+    #[test]
+    fn parse_host_port_missing_close_bracket() {
+        assert!(parse_host_port("[::1:443").is_err());
+    }
+
+    #[test]
+    fn parse_host_port_invalid_port_rejected() {
+        assert!(parse_host_port("example.com:notaport").is_err());
+        assert!(parse_host_port("example.com:99999").is_err()); // exceeds u16
+    }
+
+    #[test]
+    fn to_host_timeout_rejects_zero() {
+        let err = to_host_timeout(Some(std::time::Duration::ZERO)).unwrap_err();
+        assert!(err.to_string().contains("non-zero"));
+    }
+
+    #[test]
+    fn to_host_timeout_passes_through() {
+        assert_eq!(to_host_timeout(None).unwrap(), None);
+        assert_eq!(
+            to_host_timeout(Some(std::time::Duration::from_millis(500)))
+                .unwrap(),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn io_error_from_net_op_maps_would_block() {
+        let err = io_error_from_net_op(SysError::HostError("read would block".into()));
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn io_error_from_net_op_other_passes_through() {
+        let err = io_error_from_net_op(SysError::HostError("dns: no addresses".into()));
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
 }
