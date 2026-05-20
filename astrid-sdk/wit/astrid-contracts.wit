@@ -733,3 +733,517 @@ interface user {
     }
 }
 
+// ── users ──────────────────────────────────────────────────────────
+
+/// Users interface — within-principal user identity store.
+///
+/// Owns the cross-platform user identity mapping for a single Astrid
+/// principal. A capsule exporting this interface (the `users` capsule)
+/// handles `users.v1.<op>.request` events and publishes
+/// `users.v1.<op>.response` replies correlated by `correlation-id`.
+///
+/// This is distinct from the `user` interface (`user.v1.prompt`), which
+/// carries inbound human prompts from uplinks. Naming separation:
+///
+///   - `user`  (singular) — a single human typing into an uplink.
+///   - `users` (plural)   — the identity directory that maps platform
+///                           IDs to canonical AstridUserIds.
+///
+/// Kernel-side principal tenancy is unaffected: this interface covers
+/// user identity *within* one principal's KV scope only. Different
+/// principals have independent stores.
+///
+/// ## Two-layer identity model
+///
+/// 1. **Identity layer** — `frontend-link` records map a platform's
+///    stable opaque ID (Discord snowflake, Telegram user-id, Nostr
+///    pubkey) to a canonical `astrid-user-id`. Global per
+///    `(platform, platform-instance, platform-user-id)` triple.
+/// 2. **Presentation layer** — `context-identity` records overlay a
+///    per-context display name on a given identity link. `context-id`
+///    is opaque to the capsule — uplinks define their own scheme
+///    (`"guild:123"`, `"room:!abc:matrix.org"`, `"channel:C01234"`).
+///    Used for "how should the agent address this user *right now*"
+///    when the platform supports per-context names (Discord guild
+///    nicknames, Matrix room display names, Slack channel profiles).
+///
+/// `resolve` is context-aware: it returns a layered `display-name`
+/// in one round-trip — context override > link's platform name >
+/// AstridUser's canonical Astrid name.
+interface users {
+    // ── Envelope ──────────────────────────────────────────────────
+
+    /// Multi-tenant request envelope.
+    ///
+    /// Carries provenance ("which uplink, on behalf of which end-user")
+    /// and a correlation token so the originating uplink can match the
+    /// response back to the inflight request among many concurrent
+    /// end-users on a single principal.
+    ///
+    /// Pending the broader admin-API correlation convention (kernel
+    /// issue #748), `source` lives on this interface; once that
+    /// convention formalizes a shared envelope, this record migrates
+    /// to the shared location and the records below import it instead.
+    record source {
+        /// Originating uplink capsule — e.g. `"cli"`, `"sphere"`,
+        /// `"discord"`, `"telegram"`. Identifies the capsule making
+        /// the request (for audit and routing); distinct from
+        /// `frontend-link.platform`, which identifies the external
+        /// service being linked.
+        uplink: string,
+        /// AstridUserId of the requester when known. `None` for
+        /// system flows or pre-login pairing requests.
+        user-id: option<string>,
+        /// Correlation token. The requester subscribes to the response
+        /// topic and filters incoming responses by this string.
+        correlation-id: string,
+    }
+
+    // ── Domain records ────────────────────────────────────────────
+
+    /// Canonical Astrid user identity.
+    ///
+    /// One record per human within the principal's user directory.
+    /// `id` is the stable UUID — every `frontend-link` points at this.
+    record astrid-user {
+        /// UUID v4 string (lowercase, hyphenated). Stable for the
+        /// lifetime of the user; never reused.
+        id: string,
+        /// Optional ed25519 public key (32 bytes raw). Set via
+        /// `set-public-key`; used by future verification flows.
+        public-key: option<list<u8>>,
+        /// Operator/canonical Astrid-side display name. Mutable via
+        /// `set-display-name`. Distinct from any platform-side name.
+        display-name: option<string>,
+        /// Creation timestamp, RFC 3339 string.
+        created-at: string,
+    }
+
+    /// A platform-to-Astrid-user identity link.
+    ///
+    /// Composite key: `(platform, platform-instance?, platform-user-id)`.
+    /// Exactly one link may exist per triple; relinking overwrites.
+    record frontend-link {
+        /// Normalized platform name (lowercased, trimmed) —
+        /// e.g. `"discord"`, `"telegram"`, `"nostr"`, `"slack"`,
+        /// `"matrix"`, `"email"`, `"x"`, `"github"`.
+        platform: string,
+        /// Optional platform instance for federated / multi-tenant
+        /// platforms: Slack workspace, IRC network, XMPP server,
+        /// Mattermost instance. `None` for globally-scoped platforms
+        /// (Discord, Telegram, X) and for federated platforms whose
+        /// identifier already embeds the homeserver in the user-id
+        /// (Matrix `@alice:server.org`, Mastodon `@a@server.social`).
+        platform-instance: option<string>,
+        /// Platform-specific stable opaque user identifier
+        /// (Discord snowflake, Telegram int64, Slack `U...`, Nostr
+        /// npub, email address, E.164 phone). Never the user's
+        /// mutable handle.
+        platform-user-id: string,
+        /// The Astrid user UUID this platform identity maps to.
+        astrid-user-id: string,
+        /// When this link was created (RFC 3339). Refreshed on
+        /// upsert relink.
+        linked-at: string,
+        /// How this link was established — `"admin"`, `"system"`,
+        /// `"chat_command"`, `"passkey"`, `"self_declared"`, etc.
+        /// Recorded for audit. Free-form string.
+        method: string,
+        /// Platform's *global* display name at link time —
+        /// e.g. Discord global username `"alice"`, Telegram
+        /// `@alice`, X handle. Mutable: re-link to refresh.
+        /// Distinct from any per-context override
+        /// (see `context-identity`) and from `astrid-user.display-name`
+        /// (the operator-set canonical Astrid name).
+        display-name: option<string>,
+    }
+
+    /// Per-context display-name overlay on a `frontend-link`.
+    ///
+    /// One row per `(platform, platform-instance?, platform-user-id, context-id)`
+    /// tuple. The capsule does NOT parse `context-id`; uplinks define
+    /// per-platform schemes. Common conventions:
+    ///
+    ///   - Discord per-guild nickname:        `context-id = "guild:{guild-id}"`
+    ///   - Matrix per-room display name:      `context-id = "room:{room-id}"`
+    ///   - Slack per-channel profile:         `context-id = "channel:{channel-id}"`
+    ///                                         (workspace lives in `platform-instance`)
+    ///   - Mattermost per-team:               `context-id = "team:{team-id}"`
+    ///   - Single-context platforms (X, SMS): no rows ever created
+    ///
+    /// Per-context attributes beyond `display-name` (roles, custom
+    /// fields, preferences) intentionally do NOT live here. They
+    /// belong in memory or a future authz capsule.
+    record context-identity {
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+        /// Opaque per-platform context key.
+        context-id: string,
+        /// What this user is called *in this context*.
+        display-name: string,
+        /// Last update timestamp (RFC 3339).
+        updated-at: string,
+    }
+
+    // ── Pagination ─────────────────────────────────────────────────
+    //
+    // Paginated topics use opaque `cursor: option<string>` tokens.
+    // Callers treat the value as a black box — pass `None` on the
+    // first request, then loop while the response's `next-cursor`
+    // is `Some(token)`, passing that token back unchanged. The
+    // capsule defines the format. (Modelled as bare `option<string>`
+    // rather than a `type cursor = string` alias for codegen
+    // portability — wit-bindgen handles aliases but our JS codegen
+    // does not.)
+
+    // ── Resolve (context-aware) ───────────────────────────────────
+
+    /// Resolve a platform identity to an Astrid user, optionally
+    /// scoped to a context for display-name layering.
+    /// Topic: `users.v1.resolve.request`.
+    record resolve-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+        /// Optional context. When set, the response's `display-name`
+        /// uses the per-context override if one exists. When None,
+        /// only the link-global and canonical fallbacks apply.
+        context-id: option<string>,
+    }
+
+    /// Response for resolve.
+    /// Topic: `users.v1.resolve.response`.
+    ///
+    /// A clean "no link exists" is `user = none` with `error = none`.
+    /// Validation or storage failures populate `error` and leave the
+    /// other success fields empty.
+    record resolve-response {
+        correlation-id: string,
+        user: option<astrid-user>,
+        /// The right name to address this user. Resolution order
+        /// (first non-empty wins):
+        ///   1. `context-identity.display-name` (if `context-id` was
+        ///      provided in the request and an override exists)
+        ///   2. `frontend-link.display-name` (the platform-side name)
+        ///   3. `astrid-user.display-name` (the canonical Astrid name)
+        /// `None` if none of the three layers carry a name.
+        display-name: option<string>,
+        /// Which layer produced `display-name`. One of `"context"`,
+        /// `"link"`, `"canonical"`. `None` when `display-name` is `None`.
+        display-name-source: option<string>,
+        error: option<string>,
+    }
+
+    // ── Link ───────────────────────────────────────────────────────
+
+    /// Link a platform identity to an existing Astrid user. Upsert
+    /// semantics: an existing link for the same
+    /// `(platform, platform-instance?, platform-user-id)` is overwritten.
+    /// Topic: `users.v1.link.request`.
+    record link-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+        /// Target Astrid user UUID. Must already exist.
+        astrid-user-id: string,
+        /// Audit string — how this link was established.
+        method: string,
+        /// Optional platform-side global display name at link time.
+        /// Stored on the resulting `frontend-link` for later
+        /// resolution / display.
+        display-name: option<string>,
+    }
+
+    /// Response for link.
+    /// Topic: `users.v1.link.response`.
+    record link-response {
+        correlation-id: string,
+        link: option<frontend-link>,
+        error: option<string>,
+    }
+
+    // ── Unlink ─────────────────────────────────────────────────────
+
+    /// Remove a platform link. Also clears any
+    /// `context-identity` overlays attached to it (cascading).
+    /// Topic: `users.v1.unlink.request`.
+    record unlink-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+    }
+
+    /// Response for unlink.
+    /// Topic: `users.v1.unlink.response`.
+    record unlink-response {
+        correlation-id: string,
+        /// `true` if a link existed and was removed; `false` for a
+        /// no-op delete (link was already absent).
+        removed: bool,
+        error: option<string>,
+    }
+
+    // ── Create ─────────────────────────────────────────────────────
+
+    /// Create a new Astrid user.
+    /// Topic: `users.v1.create.request`.
+    record create-request {
+        source: source,
+        /// Optional canonical display name. Rejected if it contains
+        /// `/` or `\0`.
+        display-name: option<string>,
+    }
+
+    /// Response for create.
+    /// Topic: `users.v1.create.response`.
+    record create-response {
+        correlation-id: string,
+        user: option<astrid-user>,
+        error: option<string>,
+    }
+
+    // ── Mutate canonical fields on an AstridUser ──────────────────
+
+    /// Change an `AstridUser`'s canonical `display-name` without
+    /// rotating the UUID or breaking any links.
+    /// Topic: `users.v1.set_display_name.request`.
+    ///
+    /// `display-name = None` clears the name. To leave it unchanged,
+    /// don't issue the request.
+    record set-display-name-request {
+        source: source,
+        astrid-user-id: string,
+        display-name: option<string>,
+    }
+
+    /// Response for set-display-name.
+    /// Topic: `users.v1.set_display_name.response`.
+    record set-display-name-response {
+        correlation-id: string,
+        user: option<astrid-user>,
+        error: option<string>,
+    }
+
+    /// Set or clear an `AstridUser`'s `public-key` without rotating
+    /// the UUID.
+    /// Topic: `users.v1.set_public_key.request`.
+    ///
+    /// `public-key = None` clears the key.
+    record set-public-key-request {
+        source: source,
+        astrid-user-id: string,
+        public-key: option<list<u8>>,
+    }
+
+    /// Response for set-public-key.
+    /// Topic: `users.v1.set_public_key.response`.
+    record set-public-key-response {
+        correlation-id: string,
+        user: option<astrid-user>,
+        error: option<string>,
+    }
+
+    // ── Links (list every link for one user) ──────────────────────
+
+    /// List every platform link for one Astrid user.
+    /// Topic: `users.v1.links.request`.
+    record links-request {
+        source: source,
+        astrid-user-id: string,
+    }
+
+    /// Response for links.
+    /// Topic: `users.v1.links.response`.
+    record links-response {
+        correlation-id: string,
+        links: list<frontend-link>,
+        error: option<string>,
+    }
+
+    // ── Get (lookup user by UUID) ─────────────────────────────────
+
+    /// Fetch a user record by UUID.
+    /// Topic: `users.v1.get.request`.
+    record get-request {
+        source: source,
+        astrid-user-id: string,
+    }
+
+    /// Response for get.
+    /// Topic: `users.v1.get.response`.
+    record get-response {
+        correlation-id: string,
+        user: option<astrid-user>,
+        error: option<string>,
+    }
+
+    // ── Delete (admin) ────────────────────────────────────────────
+
+    /// Delete a user, every link pointing at it, and every
+    /// per-context overlay tied to those links.
+    /// Idempotent — deleting an absent UUID returns `deleted = false`.
+    /// Topic: `users.v1.delete.request`.
+    record delete-request {
+        source: source,
+        astrid-user-id: string,
+    }
+
+    /// Response for delete.
+    /// Topic: `users.v1.delete.response`.
+    record delete-response {
+        correlation-id: string,
+        /// `true` when a user record existed and was deleted.
+        deleted: bool,
+        error: option<string>,
+    }
+
+    // ── List users (paginated) ────────────────────────────────────
+
+    /// List every user record in the principal's store. Paginated.
+    /// Topic: `users.v1.list.request`.
+    record list-request {
+        source: source,
+        /// Cursor from a prior `list-response.next-cursor`. `None`
+        /// on the first call.
+        cursor: option<string>,
+        /// Maximum users to return. `None` lets the capsule pick a
+        /// sensible default (current impl: 100).
+        limit: option<u32>,
+    }
+
+    /// Response for list.
+    /// Topic: `users.v1.list.response`.
+    record list-response {
+        correlation-id: string,
+        users: list<astrid-user>,
+        /// Pass back as `list-request.cursor` to get the next page.
+        /// `None` when no more pages remain.
+        next-cursor: option<string>,
+        error: option<string>,
+    }
+
+    // ── Context: per-context display-name overlay ─────────────────
+
+    /// Set (or upsert) a per-context display-name override for a
+    /// linked platform identity. The underlying `frontend-link` must
+    /// already exist — context overlays cannot dangle.
+    /// Topic: `users.v1.context.set.request`.
+    record context-set-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+        context-id: string,
+        display-name: string,
+    }
+
+    /// Response for context-set.
+    /// Topic: `users.v1.context.set.response`.
+    record context-set-response {
+        correlation-id: string,
+        context-identity: option<context-identity>,
+        error: option<string>,
+    }
+
+    /// Clear a per-context display-name override. Leaves the link
+    /// itself and the global link-level display-name untouched.
+    /// Topic: `users.v1.context.clear.request`.
+    record context-clear-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+        context-id: string,
+    }
+
+    /// Response for context-clear.
+    /// Topic: `users.v1.context.clear.response`.
+    record context-clear-response {
+        correlation-id: string,
+        /// `true` if an overlay existed and was removed; `false` for
+        /// a no-op clear.
+        removed: bool,
+        error: option<string>,
+    }
+
+    /// Fetch the per-context override for one
+    /// `(link, context-id)` pair. Useful when the caller wants the
+    /// raw override without the `resolve`-style fallback chain.
+    /// Topic: `users.v1.context.get.request`.
+    record context-get-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        platform-user-id: string,
+        context-id: string,
+    }
+
+    /// Response for context-get.
+    /// Topic: `users.v1.context.get.response`.
+    record context-get-response {
+        correlation-id: string,
+        context-identity: option<context-identity>,
+        /// The same user resolved through the underlying link, when
+        /// it exists. Saves the caller a separate `resolve` call.
+        astrid-user-id: option<string>,
+        error: option<string>,
+    }
+
+    /// List every context overlay attached to one Astrid user, across
+    /// platforms and contexts. Paginated.
+    /// Topic: `users.v1.context.list_for_user.request`.
+    record context-list-for-user-request {
+        source: source,
+        astrid-user-id: string,
+        cursor: option<string>,
+        limit: option<u32>,
+    }
+
+    /// Response for context-list-for-user.
+    /// Topic: `users.v1.context.list_for_user.response`.
+    record context-list-for-user-response {
+        correlation-id: string,
+        contexts: list<context-identity>,
+        next-cursor: option<string>,
+        error: option<string>,
+    }
+
+    /// List every user known in one specific context (e.g. every
+    /// member of one Discord guild who has a per-guild nickname
+    /// recorded). Returns the context overlay rows plus the resolved
+    /// `astrid-user-id` for each, so the caller can build a member
+    /// roster in one paginated call. Paginated.
+    /// Topic: `users.v1.context.list_in_context.request`.
+    record context-list-in-context-request {
+        source: source,
+        platform: string,
+        platform-instance: option<string>,
+        context-id: string,
+        cursor: option<string>,
+        limit: option<u32>,
+    }
+
+    /// One row of the context-list-in-context response.
+    record context-member {
+        context-identity: context-identity,
+        /// Resolved Astrid user UUID via the underlying link, when
+        /// the link still exists. `None` indicates a stale overlay
+        /// (link was unlinked but overlay wasn't cleared — the
+        /// capsule cleans these on unlink, so this should be rare).
+        astrid-user-id: option<string>,
+    }
+
+    /// Response for context-list-in-context.
+    /// Topic: `users.v1.context.list_in_context.response`.
+    record context-list-in-context-response {
+        correlation-id: string,
+        members: list<context-member>,
+        next-cursor: option<string>,
+        error: option<string>,
+    }
+}
+
