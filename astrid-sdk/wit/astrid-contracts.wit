@@ -887,12 +887,15 @@ interface users {
     }
 
     // ── Pagination ─────────────────────────────────────────────────
-
-    /// Opaque pagination cursor. The capsule defines the format;
-    /// callers treat it as a string token to pass back unchanged.
-    /// `None` on first request; loop until response's `next-cursor`
-    /// is `None`.
-    type cursor = string;
+    //
+    // Paginated topics use opaque `cursor: option<string>` tokens.
+    // Callers treat the value as a black box — pass `None` on the
+    // first request, then loop while the response's `next-cursor`
+    // is `Some(token)`, passing that token back unchanged. The
+    // capsule defines the format. (Modelled as bare `option<string>`
+    // rather than a `type cursor = string` alias for codegen
+    // portability — wit-bindgen handles aliases but our JS codegen
+    // does not.)
 
     // ── Resolve (context-aware) ───────────────────────────────────
 
@@ -1106,7 +1109,7 @@ interface users {
         source: source,
         /// Cursor from a prior `list-response.next-cursor`. `None`
         /// on the first call.
-        cursor: option<cursor>,
+        cursor: option<string>,
         /// Maximum users to return. `None` lets the capsule pick a
         /// sensible default (current impl: 100).
         limit: option<u32>,
@@ -1119,7 +1122,7 @@ interface users {
         users: list<astrid-user>,
         /// Pass back as `list-request.cursor` to get the next page.
         /// `None` when no more pages remain.
-        next-cursor: option<cursor>,
+        next-cursor: option<string>,
         error: option<string>,
     }
 
@@ -1196,7 +1199,7 @@ interface users {
     record context-list-for-user-request {
         source: source,
         astrid-user-id: string,
-        cursor: option<cursor>,
+        cursor: option<string>,
         limit: option<u32>,
     }
 
@@ -1205,7 +1208,7 @@ interface users {
     record context-list-for-user-response {
         correlation-id: string,
         contexts: list<context-identity>,
-        next-cursor: option<cursor>,
+        next-cursor: option<string>,
         error: option<string>,
     }
 
@@ -1220,7 +1223,7 @@ interface users {
         platform: string,
         platform-instance: option<string>,
         context-id: string,
-        cursor: option<cursor>,
+        cursor: option<string>,
         limit: option<u32>,
     }
 
@@ -1239,7 +1242,7 @@ interface users {
     record context-list-in-context-response {
         correlation-id: string,
         members: list<context-member>,
-        next-cursor: option<cursor>,
+        next-cursor: option<string>,
         error: option<string>,
     }
 }
