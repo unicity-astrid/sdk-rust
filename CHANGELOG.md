@@ -11,7 +11,13 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Added
 
+- **`astrid_sdk::ipc::request_response(req_topic, resp_namespace, request, timeout_ms)`** — replaces the hand-rolled correlation-id handshake every capsule currently re-implements (~92 call sites across first-party capsules). Generates a v4 correlation ID, subscribes to `{resp_namespace}.{corr_id}` *before* publishing (race-safe), injects `correlation_id` into the request payload, awaits one reply with timeout, deserializes the response, and always tears down the subscription. Request payloads must serialize to a JSON object (otherwise there's no place to put the correlation ID — `ApiError`). Capsule-side migration removes 8-15 lines of boilerplate per call site.
+
 - **`astrid_sdk::net::connect(host, port)` + `astrid_sdk::net::TcpStream`** — outbound TCP. `connect` is the low-level call returning a `StreamHandle`, parallel to the existing `accept`. `TcpStream` is the `std::net::TcpStream`-shaped facade with `std::io::Read + Write` impls and RAII close-on-drop; user code generally writes `TcpStream::connect("host:port")`. Underlying ABI is the new `astrid:capsule/net.net-connect-tcp` host fn ([wit#5](https://github.com/unicity-astrid/wit/pull/5)); capability-gated against a per-capsule `net_connect` allowlist in `Capsule.toml` (kernel-side, separate PR). SSRF airlock runs on the resolved IP, matching the gate on `http-request`. Unblocks WebSocket, MQTT, Discord/Telegram, postgres/redis, etc. Tracking issue: [astrid#745](https://github.com/unicity-astrid/astrid/issues/745). RFC: [rfcs#27](https://github.com/unicity-astrid/rfcs/pull/27).
+
+### Changed
+
+- **`astrid_sdk::lib.rs` split into per-module files.** `lib.rs` previously held every module inline (~1500 lines); large modules (`ipc`, `kv`, `http`, `process`, `elicit`, `interceptors`, `identity`) are now their own files under `astrid-sdk/src/`. `lib.rs` retains the small modules (`uplink`, `env`, `time`, `log`, `runtime`, `hooks`, `capabilities`, `approval`, `prelude`), the crate-wide `SysError`, and the module declarations. Public API surface is unchanged; this is a pure file reorganization. Side effect: file-size pre-commit hook now passes (the threshold is 1000 lines).
 
 ## [0.6.1] - 2026-05-19
 
