@@ -7,7 +7,15 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Component Model bindings (Airlocks) for the Astrid OS runtime"
-include = ["src/**/*", "wit/**/*", "Cargo.toml", "LICENSE-*", "README.md"]
+build = "build.rs"
+include = [
+    "src/**/*",
+    "build.rs",
+    "../contracts/host/**/*.wit",
+    "Cargo.toml",
+    "LICENSE-*",
+    "README.md",
+]
 
 [dependencies]
 wit-bindgen = { version = "0.54", default-features = false, features = ["macros"] }
