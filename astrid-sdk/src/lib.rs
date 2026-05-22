@@ -27,7 +27,6 @@
 //! | [`kv`]          | N/A              | Persistent key-value storage           |
 //! | [`http`]        | N/A              | Outbound HTTP requests                 |
 //! | [`uplink`]      | N/A              | Direct frontend messaging              |
-//! | [`hooks`]       | N/A              | User middleware triggers               |
 //! | [`elicit`]      | N/A              | Interactive install/upgrade prompts    |
 //! | [`identity`]    | N/A              | Platform user identity resolution      |
 //! | [`approval`]    | N/A              | Human approval for sensitive actions   |
@@ -50,9 +49,6 @@ use astrid_sys::astrid::elicit::host as wit_elicit;
 use astrid_sys::astrid::fs::host as wit_fs;
 use astrid_sys::astrid::http::host as wit_http;
 use astrid_sys::astrid::identity::host as wit_identity;
-use astrid_sys::astrid::io::error as wit_io_error;
-use astrid_sys::astrid::io::poll as wit_io_poll;
-use astrid_sys::astrid::io::streams as wit_io_streams;
 use astrid_sys::astrid::ipc::host as wit_ipc;
 use astrid_sys::astrid::kv::host as wit_kv;
 use astrid_sys::astrid::net::host as wit_net;
@@ -114,7 +110,13 @@ pub use astrid_sys;
 #[doc(hidden)]
 pub use schemars;
 
-/// Core error type for SDK operations
+/// Core error type for SDK operations.
+///
+/// Per-domain WIT host fns return their own typed `ErrorCode` enum
+/// (`astrid:fs/host.error-code`, `astrid:ipc/host.error-code`, etc.).
+/// At the SDK boundary every such typed error is converted to
+/// [`SysError::HostError`] via [`host_err`] (a `Debug` formatting),
+/// keeping the existing capsule-author-facing surface stable.
 #[derive(Error, Debug)]
 pub enum SysError {
     #[error("Host function call failed: {0}")]
@@ -125,6 +127,18 @@ pub enum SysError {
     BorshError(#[from] std::io::Error),
     #[error("API logic error: {0}")]
     ApiError(String),
+}
+
+/// Convert any per-domain `ErrorCode` (or other `Debug` host failure)
+/// into a [`SysError::HostError`] via `Debug` formatting.
+///
+/// The migration guide instructs the SDK to surface typed kernel errors
+/// uniformly through `SysError::HostError(String)`. This keeps the
+/// capsule-author API stable across the WIT split while still carrying
+/// the typed variant name (e.g. `"CapabilityDenied"`,
+/// `"Unknown(\"port pending\")"`) in the error string for log parity.
+pub(crate) fn host_err<E: core::fmt::Debug>(e: E) -> SysError {
+    SysError::HostError(format!("{e:?}"))
 }
 
 pub mod fs;
@@ -168,23 +182,83 @@ pub mod uplink {
         }
     }
 
+    /// Uplink profile — how the kernel routes inbound messages.
+    ///
+    /// Mirrors the `astrid:uplink/host.uplink-profile` enum. The
+    /// variants name the canonical interaction patterns the kernel
+    /// recognises.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Profile {
+        /// Conversational chat (Telegram, Discord DM, Slack DM).
+        Chat,
+        /// Long-lived interactive session (CLI TTY).
+        Interactive,
+        /// One-way notification sink.
+        Notify,
+        /// Bidirectional bridge to another runtime.
+        Bridge,
+    }
+
+    impl Profile {
+        fn to_wit(self) -> wit_uplink::UplinkProfile {
+            match self {
+                Self::Chat => wit_uplink::UplinkProfile::Chat,
+                Self::Interactive => wit_uplink::UplinkProfile::Interactive,
+                Self::Notify => wit_uplink::UplinkProfile::Notify,
+                Self::Bridge => wit_uplink::UplinkProfile::Bridge,
+            }
+        }
+
+        /// Parse a profile from one of the canonical lowercase names.
+        ///
+        /// Accepts `"chat"`, `"interactive"`, `"notify"`, `"bridge"`.
+        /// Returns [`SysError::ApiError`] for any other value.
+        ///
+        /// Named `parse` rather than `from_str` to avoid the
+        /// `std::str::FromStr` trait-method shadowing trap (the SDK's
+        /// error type isn't `FromStr::Err`'s expected shape).
+        pub fn parse(s: &str) -> Result<Self, SysError> {
+            match s {
+                "chat" => Ok(Self::Chat),
+                "interactive" => Ok(Self::Interactive),
+                "notify" => Ok(Self::Notify),
+                "bridge" => Ok(Self::Bridge),
+                other => Err(SysError::ApiError(format!("unknown uplink profile: {other}"))),
+            }
+        }
+    }
+
     /// Register a new uplink connection. Returns a typed [`UplinkId`].
+    ///
+    /// `profile` is one of `"chat"`, `"interactive"`, `"notify"`, `"bridge"`.
     pub fn register(name: &str, platform: &str, profile: &str) -> Result<UplinkId, SysError> {
+        let parsed = Profile::parse(profile)?;
         let id =
-            wit_uplink::uplink_register(name, platform, profile).map_err(SysError::HostError)?;
+            wit_uplink::uplink_register(name, platform, parsed.to_wit()).map_err(host_err)?;
+        Ok(UplinkId(id))
+    }
+
+    /// Register a new uplink connection with a typed [`Profile`].
+    pub fn register_profile(
+        name: &str,
+        platform: &str,
+        profile: Profile,
+    ) -> Result<UplinkId, SysError> {
+        let id = wit_uplink::uplink_register(name, platform, profile.to_wit())
+            .map_err(host_err)?;
         Ok(UplinkId(id))
     }
 
     /// Send a message to a user via an uplink.
     ///
-    /// Returns `true` if sent, `false` if the message was dropped.
+    /// Returns `true` if sent, `false` if the message was dropped
+    /// (no active session for the target principal).
     pub fn send(
         uplink_id: &UplinkId,
         platform_user_id: &str,
         content: &str,
     ) -> Result<bool, SysError> {
-        wit_uplink::uplink_send(&uplink_id.0, platform_user_id, content)
-            .map_err(SysError::HostError)
+        wit_uplink::uplink_send(&uplink_id.0, platform_user_id, content).map_err(host_err)
     }
 }
 
@@ -206,16 +280,29 @@ pub mod env {
     pub const CONFIG_SOCKET_PATH: &str = "ASTRID_SOCKET_PATH";
 
     /// Read a config value as raw bytes. Like `std::env::var_os`.
+    ///
+    /// Returns an empty `Vec` if the key is not set in the manifest
+    /// (matching the pre-migration shape so capsule code that treats
+    /// "missing key" and "empty value" the same continues to compile).
     pub fn var_bytes(key: &str) -> Result<Vec<u8>, SysError> {
-        let key_str = key;
-        let result = wit_sys::get_config(key_str).map_err(SysError::HostError)?;
-        Ok(result.into_bytes())
+        let value = wit_sys::get_config(key).map_err(host_err)?;
+        Ok(value.unwrap_or_default().into_bytes())
     }
 
     /// Read a config value as a UTF-8 string. Like `std::env::var`.
+    ///
+    /// Returns an empty string if the key is not set in the manifest.
+    /// To distinguish "missing" from "empty", use [`var_opt`].
     pub fn var(key: &str) -> Result<String, SysError> {
-        let key_str = key;
-        wit_sys::get_config(key_str).map_err(SysError::HostError)
+        let value = wit_sys::get_config(key).map_err(host_err)?;
+        Ok(value.unwrap_or_default())
+    }
+
+    /// Read a config value, returning `None` if the key is not set.
+    ///
+    /// The empty string is a valid value distinct from `None`.
+    pub fn var_opt(key: &str) -> Result<Option<String>, SysError> {
+        wit_sys::get_config(key).map_err(host_err)
     }
 }
 
@@ -230,11 +317,27 @@ pub mod time {
     /// Returns the current wall-clock time.
     ///
     /// This is a host call — the WASM guest has no direct access to the
-    /// system clock. Unlike [`std::time::SystemTime::now`], this returns
-    /// `Result` because the host call can fail.
+    /// system clock. Returns `Result` for API symmetry; the underlying
+    /// host fn is infallible.
     pub fn now() -> Result<std::time::SystemTime, SysError> {
         let ms = wit_sys::clock_ms();
         Ok(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
+    }
+
+    /// Returns a monotonic clock reading.
+    ///
+    /// Suitable for measuring elapsed time within an invocation. Does
+    /// not jump with NTP adjustments. The absolute value is meaningless
+    /// across capsule reloads — only differences are.
+    pub fn monotonic() -> std::time::Duration {
+        std::time::Duration::from_nanos(wit_sys::clock_monotonic_ns())
+    }
+
+    /// Block the calling task for the given duration. Capped server-side
+    /// at 60 seconds per call; loop on shorter sleeps for longer waits.
+    pub fn sleep(duration: std::time::Duration) -> Result<(), SysError> {
+        let ns = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        wit_sys::sleep_ns(ns).map_err(host_err)
     }
 }
 
@@ -247,27 +350,27 @@ pub mod log {
 
     /// Log at TRACE level.
     pub fn trace(message: impl Display) {
-        wit_sys::log(wit_types::LogLevel::Trace, &format!("{message}"));
+        wit_sys::log(wit_sys::LogLevel::Trace, &format!("{message}"));
     }
 
     /// Log at DEBUG level.
     pub fn debug(message: impl Display) {
-        wit_sys::log(wit_types::LogLevel::Debug, &format!("{message}"));
+        wit_sys::log(wit_sys::LogLevel::Debug, &format!("{message}"));
     }
 
     /// Log at INFO level.
     pub fn info(message: impl Display) {
-        wit_sys::log(wit_types::LogLevel::Info, &format!("{message}"));
+        wit_sys::log(wit_sys::LogLevel::Info, &format!("{message}"));
     }
 
     /// Log at WARN level.
     pub fn warn(message: impl Display) {
-        wit_sys::log(wit_types::LogLevel::Warn, &format!("{message}"));
+        wit_sys::log(wit_sys::LogLevel::Warn, &format!("{message}"));
     }
 
     /// Log at ERROR level.
     pub fn error(message: impl Display) {
-        wit_sys::log(wit_types::LogLevel::Error, &format!("{message}"));
+        wit_sys::log(wit_sys::LogLevel::Error, &format!("{message}"));
     }
 }
 
@@ -287,7 +390,7 @@ pub mod runtime {
 
     /// Retrieves the caller context (User ID and Session ID) for the current execution.
     pub fn caller() -> Result<crate::types::CallerContext, SysError> {
-        let ctx = wit_sys::get_caller().map_err(SysError::HostError)?;
+        let ctx = wit_sys::get_caller().map_err(host_err)?;
         Ok(crate::types::CallerContext {
             source_id: ctx.source_id,
             principal: ctx.principal,
@@ -300,7 +403,9 @@ pub mod runtime {
     /// Reads from the well-known `ASTRID_SOCKET_PATH` config key that the
     /// kernel injects into every capsule at load time.
     pub fn socket_path() -> Result<String, SysError> {
-        let path = crate::env::var(crate::env::CONFIG_SOCKET_PATH)?;
+        let path = crate::env::var_opt(crate::env::CONFIG_SOCKET_PATH)?.ok_or_else(|| {
+            SysError::ApiError("ASTRID_SOCKET_PATH config key is not set".to_string())
+        })?;
         // WIT get-config returns values directly (no JSON encoding).
         if path.is_empty() {
             return Err(SysError::ApiError(
@@ -315,14 +420,15 @@ pub mod runtime {
         }
         Ok(path)
     }
-}
 
-/// The Hooks Airlock — Executing User Middleware
-pub mod hooks {
-    use super::*;
-
-    pub fn trigger(event: &str) -> Result<String, SysError> {
-        wit_sys::trigger_hook(event).map_err(SysError::HostError)
+    /// Fill the requested length with cryptographically secure random
+    /// bytes from the host's OS-level CSPRNG.
+    ///
+    /// Capped server-side at 4096 bytes per call; loop for bulk
+    /// entropy. Suitable for cryptographic key material.
+    pub fn random_bytes(length: usize) -> Result<Vec<u8>, SysError> {
+        let len = u64::try_from(length).unwrap_or(u64::MAX);
+        wit_sys::random_bytes(len).map_err(host_err)
     }
 }
 
@@ -338,13 +444,13 @@ pub mod capabilities {
     ///
     /// Returns `true` if the capsule identified by `source_uuid` has the
     /// given `capability` declared in its manifest. Returns `false` for
-    /// unknown UUIDs, unknown capabilities, or on any error (fail-closed).
+    /// unknown UUIDs, unknown capabilities (fail-closed).
     pub fn check(source_uuid: &str, capability: &str) -> Result<bool, SysError> {
-        let request = wit_types::CapabilityCheckRequest {
+        let request = wit_sys::CapabilityCheckRequest {
             source_uuid: source_uuid.to_string(),
             capability: capability.to_string(),
         };
-        let response = wit_sys::check_capsule_capability(&request).map_err(SysError::HostError)?;
+        let response = wit_sys::check_capsule_capability(&request).map_err(host_err)?;
         Ok(response.allowed)
     }
 }
@@ -403,13 +509,49 @@ pub mod identity;
 pub mod approval {
     use super::*;
 
+    /// The decision returned by the host (or by an existing allowance
+    /// pattern) for an [`request`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Decision {
+        /// Denied — capsule must not proceed.
+        Denied,
+        /// Approved once.
+        Approved,
+        /// Approved for the current session.
+        ApprovedSession,
+        /// Approved permanently (stored in the AllowanceStore).
+        ApprovedAlways,
+        /// Auto-approved via an existing allowance pattern.
+        Allowance,
+    }
+
+    impl Decision {
+        /// Whether this decision permits the action.
+        #[must_use]
+        pub fn is_approved(self) -> bool {
+            !matches!(self, Self::Denied)
+        }
+
+        fn from_wit(d: wit_approval::ApprovalDecision) -> Self {
+            match d {
+                wit_approval::ApprovalDecision::Denied => Self::Denied,
+                wit_approval::ApprovalDecision::Approved => Self::Approved,
+                wit_approval::ApprovalDecision::ApprovedSession => Self::ApprovedSession,
+                wit_approval::ApprovalDecision::ApprovedAlways => Self::ApprovedAlways,
+                wit_approval::ApprovalDecision::Allowance => Self::Allowance,
+            }
+        }
+    }
+
     /// Request human approval for a sensitive action.
     ///
     /// Blocks the capsule until the frontend user responds or the request
     /// times out. If an existing allowance matches, returns immediately
     /// without prompting.
     ///
-    /// Returns `true` if approved, `false` if denied.
+    /// Returns `true` if approved (any approval variant), `false` if denied.
+    /// For the specific decision class (one-shot vs session vs always vs
+    /// allowance-hit), use [`request_decision`].
     ///
     /// # Example
     /// ```ignore
@@ -418,12 +560,17 @@ pub mod approval {
     /// }
     /// ```
     pub fn request(action: &str, resource: &str) -> Result<bool, SysError> {
-        let req = wit_types::ApprovalRequest {
+        Ok(request_decision(action, resource)?.is_approved())
+    }
+
+    /// Request human approval and return the specific [`Decision`].
+    pub fn request_decision(action: &str, resource: &str) -> Result<Decision, SysError> {
+        let req = wit_approval::ApprovalRequest {
             action: action.to_string(),
             target_resource: resource.to_string(),
         };
-        let resp = wit_approval::request_approval(&req).map_err(SysError::HostError)?;
-        Ok(resp.approved)
+        let resp = wit_approval::request_approval(&req).map_err(host_err)?;
+        Ok(Decision::from_wit(resp.decision))
     }
 }
 
@@ -437,7 +584,6 @@ pub mod prelude {
         // std-mirrored modules
         env,
         fs,
-        hooks,
         http,
         identity,
         interceptors,

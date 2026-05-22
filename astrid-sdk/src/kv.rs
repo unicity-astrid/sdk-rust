@@ -1,24 +1,52 @@
-//\! Per-capsule, per-principal key-value storage.
+//! Per-capsule, per-principal key-value storage.
+//!
+//! Backed by the typed `astrid:kv/host@1.0.0` package. Keys are scoped
+//! per-principal and per-capsule by the kernel; the SDK never needs to
+//! prefix or namespace them. Values are arbitrary bytes (max 1 MiB).
 
 use super::*;
 
+/// Read a value as raw bytes.
+///
+/// Returns an empty `Vec` when the key is absent. The pre-migration
+/// shape collapsed "missing" and "empty" into the same `Vec<u8>`; for
+/// the disambiguated form use [`get_bytes_opt`].
 pub fn get_bytes(key: &str) -> Result<Vec<u8>, SysError> {
-    let key_str = key;
-    let result = wit_kv::kv_get(key_str).map_err(SysError::HostError)?;
-    Ok(result.unwrap_or_default())
+    Ok(get_bytes_opt(key)?.unwrap_or_default())
 }
 
+/// Read a value as raw bytes, distinguishing "missing" (`Ok(None)`) from
+/// "empty value" (`Ok(Some(vec![]))`).
+pub fn get_bytes_opt(key: &str) -> Result<Option<Vec<u8>>, SysError> {
+    wit_kv::kv_get(key).map_err(host_err)
+}
+
+/// Write a value as raw bytes. Atomic per-key replacement.
 pub fn set_bytes(key: &str, value: &[u8]) -> Result<(), SysError> {
-    let key_str = key;
-    wit_kv::kv_set(key_str, value).map_err(SysError::HostError)
+    wit_kv::kv_set(key, value).map_err(host_err)
 }
 
+/// Read and deserialize a JSON value.
+///
+/// Returns an error if the key is missing OR the stored bytes are not
+/// valid JSON for `T`. For the "may be absent" variant use
+/// [`get_json_opt`].
 pub fn get_json<T: DeserializeOwned>(key: &str) -> Result<T, SysError> {
     let bytes = get_bytes(key)?;
     let parsed = serde_json::from_slice(&bytes)?;
     Ok(parsed)
 }
 
+/// Read and deserialize a JSON value, returning `None` if the key is
+/// absent.
+pub fn get_json_opt<T: DeserializeOwned>(key: &str) -> Result<Option<T>, SysError> {
+    match get_bytes_opt(key)? {
+        Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// JSON-serialize and write a value.
 pub fn set_json<T: Serialize>(key: &str, value: &T) -> Result<(), SysError> {
     let bytes = serde_json::to_vec(value)?;
     set_bytes(key, &bytes)
@@ -26,30 +54,59 @@ pub fn set_json<T: Serialize>(key: &str, value: &T) -> Result<(), SysError> {
 
 /// Delete a key from the KV store.
 ///
-/// This is idempotent: deleting a non-existent key succeeds silently.
-/// The underlying store returns whether the key existed, but that
-/// information is not surfaced through the WASM host boundary.
+/// Idempotent: deleting a non-existent key succeeds silently.
 pub fn delete(key: &str) -> Result<(), SysError> {
-    let key_str = key;
-    wit_kv::kv_delete(key_str).map_err(SysError::HostError)
+    wit_kv::kv_delete(key).map_err(host_err)
 }
 
 /// List all keys matching a prefix.
 ///
-/// Returns an empty vec if no keys match. The prefix is matched
-/// against key names within the capsule's scoped namespace.
+/// Capped server-side at 1024 keys per call; larger result sets return
+/// `too-large` directing the caller to [`list_keys_page`].
 pub fn list_keys(prefix: &str) -> Result<Vec<String>, SysError> {
-    let prefix_str = prefix;
-    wit_kv::kv_list_keys(prefix_str).map_err(SysError::HostError)
+    wit_kv::kv_list_keys(prefix).map_err(host_err)
 }
 
-/// Delete all keys matching a prefix.
+/// A single page of keys returned by [`list_keys_page`].
+#[derive(Debug, Clone)]
+pub struct KeyPage {
+    /// Keys matching the prefix in this page.
+    pub keys: Vec<String>,
+    /// Cursor for the next call. `None` on the last page.
+    pub next_cursor: Option<String>,
+}
+
+/// Paginated key listing for unbounded stores.
 ///
-/// Returns the number of keys deleted. The prefix is matched
-/// against key names within the capsule's scoped namespace.
+/// Pass `None` for `cursor` on the first call, then the value from
+/// [`KeyPage::next_cursor`] on subsequent calls. `limit` is capped at
+/// 1024 per page; 0 means "use the server default."
+pub fn list_keys_page(
+    prefix: &str,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<KeyPage, SysError> {
+    let page = wit_kv::kv_list_keys_page(prefix, cursor, limit).map_err(host_err)?;
+    Ok(KeyPage {
+        keys: page.keys,
+        next_cursor: page.next_cursor,
+    })
+}
+
+/// Delete all keys matching a prefix. Returns the count removed.
 pub fn clear_prefix(prefix: &str) -> Result<u64, SysError> {
-    let prefix_str = prefix;
-    wit_kv::kv_clear_prefix(prefix_str).map_err(SysError::HostError)
+    wit_kv::kv_clear_prefix(prefix).map_err(host_err)
+}
+
+/// Atomic compare-and-swap.
+///
+/// If the key's current value equals `expected`, replace it with `new`
+/// and return `true`. Otherwise leave the store unchanged and return
+/// `false` (caller retries with the new current value). `expected` of
+/// `None` means "swap only if the key does not currently exist"
+/// (create-if-absent).
+pub fn cas(key: &str, expected: Option<&[u8]>, new: &[u8]) -> Result<bool, SysError> {
+    wit_kv::kv_cas(key, expected, new).map_err(host_err)
 }
 
 pub fn get_borsh<T: BorshDeserialize>(key: &str) -> Result<T, SysError> {
@@ -121,20 +178,24 @@ pub fn get_versioned<T: DeserializeOwned>(
     key: &str,
     current_version: u32,
 ) -> Result<Versioned<T>, SysError> {
-    let bytes = get_bytes(key)?;
-    parse_versioned(&bytes, current_version)
+    let bytes = get_bytes_opt(key)?;
+    parse_versioned(bytes.as_deref(), current_version)
 }
 
 /// Core parsing logic for versioned KV data, separated from FFI for
-/// testability. Operates on raw bytes as returned by `get_bytes`.
+/// testability. Operates on the raw bytes returned by [`get_bytes_opt`].
 fn parse_versioned<T: DeserializeOwned>(
-    bytes: &[u8],
+    bytes: Option<&[u8]>,
     current_version: u32,
 ) -> Result<Versioned<T>, SysError> {
-    // The host function `kv_get` returns an empty slice when the
-    // key is absent. A present key written via set_json/set_versioned
-    // always has at least the JSON envelope bytes, so empty = not found.
+    let Some(bytes) = bytes else {
+        return Ok(Versioned::NotFound);
+    };
     if bytes.is_empty() {
+        // An explicitly-stored empty value is a malformed envelope —
+        // treat it the same as "not found" rather than silently
+        // accepting an empty object. The pre-migration host returned an
+        // empty slice for "missing" too, so this preserves behaviour.
         return Ok(Versioned::NotFound);
     }
 
@@ -276,15 +337,21 @@ mod tests {
     // ---- parse_versioned logic tests ----
 
     #[test]
+    fn parse_versioned_none_returns_not_found() {
+        let result = parse_versioned::<TestData>(None, 1).unwrap();
+        assert!(matches!(result, Versioned::NotFound));
+    }
+
+    #[test]
     fn parse_versioned_empty_bytes_returns_not_found() {
-        let result = parse_versioned::<TestData>(b"", 1).unwrap();
+        let result = parse_versioned::<TestData>(Some(b""), 1).unwrap();
         assert!(matches!(result, Versioned::NotFound));
     }
 
     #[test]
     fn parse_versioned_current_version_returns_current() {
         let bytes = br#"{"__sv":2,"data":{"name":"hello","count":42}}"#;
-        let result = parse_versioned::<TestData>(bytes, 2).unwrap();
+        let result = parse_versioned::<TestData>(Some(bytes), 2).unwrap();
         match result {
             Versioned::Current(data) => {
                 assert_eq!(data.name, "hello");
@@ -297,7 +364,7 @@ mod tests {
     #[test]
     fn parse_versioned_older_version_returns_needs_migration() {
         let bytes = br#"{"__sv":1,"data":{"name":"old","count":1}}"#;
-        let result = parse_versioned::<TestData>(bytes, 3).unwrap();
+        let result = parse_versioned::<TestData>(Some(bytes), 3).unwrap();
         match result {
             Versioned::NeedsMigration {
                 raw,
@@ -314,7 +381,7 @@ mod tests {
     #[test]
     fn parse_versioned_newer_version_returns_error() {
         let bytes = br#"{"__sv":5,"data":{"name":"future","count":0}}"#;
-        let result = parse_versioned::<TestData>(bytes, 2);
+        let result = parse_versioned::<TestData>(Some(bytes), 2);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -326,7 +393,7 @@ mod tests {
     #[test]
     fn parse_versioned_plain_json_returns_unversioned() {
         let bytes = br#"{"name":"legacy","count":99}"#;
-        let result = parse_versioned::<TestData>(bytes, 1).unwrap();
+        let result = parse_versioned::<TestData>(Some(bytes), 1).unwrap();
         match result {
             Versioned::Unversioned(val) => {
                 assert_eq!(val["name"], "legacy");
@@ -339,7 +406,7 @@ mod tests {
     #[test]
     fn parse_versioned_malformed_sv_without_data_returns_error() {
         let bytes = br#"{"__sv":1,"payload":"something"}"#;
-        let result = parse_versioned::<TestData>(bytes, 1);
+        let result = parse_versioned::<TestData>(Some(bytes), 1);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -351,7 +418,7 @@ mod tests {
     #[test]
     fn parse_versioned_non_numeric_sv_returns_error() {
         let bytes = br#"{"__sv":"one","data":{}}"#;
-        let result = parse_versioned::<TestData>(bytes, 1);
+        let result = parse_versioned::<TestData>(Some(bytes), 1);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -364,13 +431,13 @@ mod tests {
     fn parse_versioned_version_zero_is_valid() {
         // Version 0 is a legitimate version (initial schema).
         let bytes = br#"{"__sv":0,"data":{"name":"v0","count":0}}"#;
-        let result = parse_versioned::<TestData>(bytes, 0).unwrap();
+        let result = parse_versioned::<TestData>(Some(bytes), 0).unwrap();
         assert!(matches!(result, Versioned::Current(_)));
     }
 
     #[test]
     fn parse_versioned_invalid_json_returns_error() {
-        let result = parse_versioned::<TestData>(b"not json", 1);
+        let result = parse_versioned::<TestData>(Some(b"not json"), 1);
         assert!(result.is_err());
     }
 }

@@ -1,30 +1,62 @@
+//! Networking — Unix-domain sockets, outbound TCP, UDP, and DNS lookup.
+//!
+//! Backed by `astrid:net/host@1.0.0`. Every kernel-side resource
+//! (listener, stream, socket) is wrapped in a typed Rust handle whose
+//! `Drop` releases the resource — no manual close on the happy path.
+//!
+//! The `astrid:net.tcp-stream` resource is shared between Unix-domain
+//! accepted connections and outbound TCP; TCP-only socket options
+//! (`set_nodelay`, `keepalive`, `set_hop_limit`, …) return
+//! `host_err("NotTcp")` when called on a Unix-domain stream.
+
 use super::*;
 
-/// Represents a bound network listener.
-#[derive(Debug, Clone)]
-pub struct ListenerHandle(pub(crate) u64);
+/// Direction argument for [`TcpStream::shutdown`] — mirror of
+/// [`std::net::Shutdown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// Half-close the read side.
+    Read,
+    /// Half-close the write side.
+    Write,
+    /// Close both directions.
+    Both,
+}
 
-impl ListenerHandle {
-    /// Raw handle ID for interop with lower-level APIs.
-    #[must_use]
-    pub fn id(&self) -> u64 {
-        self.0
+impl Shutdown {
+    fn to_wit(self) -> wit_net::ShutdownHow {
+        match self {
+            Self::Read => wit_net::ShutdownHow::Receive,
+            Self::Write => wit_net::ShutdownHow::Send,
+            Self::Both => wit_net::ShutdownHow::Both,
+        }
     }
 }
 
-/// Represents an open network stream.
+/// Status of a framed read on a [`TcpStream`].
+///
+/// Mirrors `astrid:net/host.net-read-status`.
 #[derive(Debug, Clone)]
-pub struct StreamHandle(pub(crate) u64);
+pub enum ReadStatus {
+    /// Data frame received.
+    Data(Vec<u8>),
+    /// Stream closed by peer.
+    Closed,
+    /// No data available right now (non-blocking).
+    Pending,
+}
 
-impl StreamHandle {
-    /// Raw handle ID for interop with lower-level APIs.
-    #[must_use]
-    pub fn id(&self) -> u64 {
-        self.0
+impl ReadStatus {
+    fn from_wit(status: wit_net::NetReadStatus) -> Self {
+        match status {
+            wit_net::NetReadStatus::Data(bytes) => Self::Data(bytes),
+            wit_net::NetReadStatus::Closed => Self::Closed,
+            wit_net::NetReadStatus::Pending => Self::Pending,
+        }
     }
 }
 
-/// Error returned by [`recv`] when the stream is closed.
+/// Error returned by [`TcpStream::recv`] when the stream is closed.
 ///
 /// Mirrors [`std::sync::mpsc::RecvError`] — the only reason a blocking
 /// receive fails is that the peer has disconnected.
@@ -39,13 +71,12 @@ impl core::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// Error returned by [`try_recv`] when no message is ready or the stream
-/// is closed.
+/// Error returned by [`TcpStream::try_recv`].
 ///
 /// Mirrors [`std::sync::mpsc::TryRecvError`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum TryRecvError {
-    /// No message is available yet — try again later.
+    /// No message available yet — try again later.
     Empty,
     /// The peer has disconnected and no more messages will arrive.
     Closed,
@@ -62,10 +93,7 @@ impl core::fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
-/// Error returned by [`send`] when the stream is closed and the message
-/// could not be delivered.
-///
-/// Mirrors [`std::sync::mpsc::SendError`].
+/// Error returned by [`TcpStream::send`] when the stream is closed.
 #[derive(Debug)]
 pub struct SendError;
 
@@ -77,167 +105,432 @@ impl core::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// Bind the kernel-provisioned Unix Domain Socket and return a listener handle.
+/// The capsule's pre-bound Unix-domain listener.
 ///
-/// The kernel pre-provisions a single Unix socket per capsule. Use
-/// [`crate::runtime::socket_path()`] to discover the actual socket path.
-pub fn bind_unix() -> Result<ListenerHandle, SysError> {
-    let handle = wit_net::net_bind_unix(0).map_err(SysError::HostError)?;
-    Ok(ListenerHandle(handle))
+/// Returned by [`bind_unix`]. RAII wraps the kernel-side resource;
+/// drop releases the listener.
+#[derive(Debug)]
+pub struct UnixListener {
+    inner: wit_net::UnixListener,
 }
 
-/// Block until the next incoming connection arrives on the listener.
-pub fn accept(listener: &ListenerHandle) -> Result<StreamHandle, SysError> {
-    let handle = wit_net::net_accept(listener.0).map_err(SysError::HostError)?;
-    Ok(StreamHandle(handle))
+impl UnixListener {
+    /// Blocking accept of the next inbound Unix-domain connection.
+    pub fn accept(&self) -> Result<TcpStream, SysError> {
+        let inner = self.inner.accept().map_err(host_err)?;
+        Ok(TcpStream { inner })
+    }
+
+    /// Polling accept with a caller-controlled timeout (capped at
+    /// 60_000 ms by the host). Returns `None` if no connection arrived
+    /// within the deadline.
+    pub fn try_accept(&self, timeout_ms: u64) -> Result<Option<TcpStream>, SysError> {
+        let result = self.inner.poll_accept(timeout_ms).map_err(host_err)?;
+        Ok(result.map(|inner| TcpStream { inner }))
+    }
 }
 
-/// Non-blocking accept. Returns `Ok(Some(stream))` if a connection was
-/// pending, `Ok(None)` if no connection is ready yet, or `Err` on a
-/// listener error.
-pub fn try_accept(listener: &ListenerHandle) -> Result<Option<StreamHandle>, SysError> {
-    let result = wit_net::net_poll_accept(listener.0).map_err(SysError::HostError)?;
-    Ok(result.map(StreamHandle))
+/// A bound TCP listener accepting inbound connections from the network.
+///
+/// Returned by [`bind_tcp`]. RAII over `astrid:net.tcp-listener`.
+/// Per-capsule cap: 4 TCP listeners.
+#[derive(Debug)]
+pub struct TcpListener {
+    inner: wit_net::TcpListener,
 }
 
-/// Receive the next message from the stream, blocking until one arrives.
+impl TcpListener {
+    /// Blocking accept of the next inbound TCP connection.
+    pub fn accept(&self) -> Result<TcpStream, SysError> {
+        let inner = self.inner.accept().map_err(host_err)?;
+        Ok(TcpStream { inner })
+    }
+
+    /// Polling accept with caller-controlled timeout.
+    pub fn try_accept(&self, timeout_ms: u64) -> Result<Option<TcpStream>, SysError> {
+        let result = self.inner.poll_accept(timeout_ms).map_err(host_err)?;
+        Ok(result.map(|inner| TcpStream { inner }))
+    }
+
+    /// Local bind address as `"ip:port"`.
+    pub fn local_addr(&self) -> Result<String, SysError> {
+        self.inner.local_addr().map_err(host_err)
+    }
+}
+
+/// A bidirectional byte stream — outbound TCP, inbound TCP-listener
+/// accepts, and Unix-domain accepts all use this type.
 ///
-/// Returns `Err(RecvError)` if the peer has disconnected.
-///
-/// Analogous to [`std::sync::mpsc::Receiver::recv`].
-pub fn recv(stream: &StreamHandle) -> Result<Vec<u8>, RecvError> {
-    loop {
-        match try_recv(stream) {
-            Ok(bytes) => return Ok(bytes),
-            Err(TryRecvError::Closed) => return Err(RecvError),
-            Err(TryRecvError::Empty) => {
-                // The WIT net-read function is non-blocking. This is a polling
-                // loop — sleep between attempts to avoid spinning the CPU.
-                // 50ms balances responsiveness with CPU usage.
-                std::thread::sleep(std::time::Duration::from_millis(50));
+/// Owns the kernel-side `astrid:net.tcp-stream` resource. Drop closes
+/// the stream automatically. Per-capsule cap: 8 streams.
+#[derive(Debug)]
+pub struct TcpStream {
+    inner: wit_net::TcpStream,
+}
+
+impl TcpStream {
+    /// Open an outbound TCP connection to `host:port`.
+    ///
+    /// DNS resolution and the SSRF airlock run host-side; the WASM
+    /// guest only sees the parsed host and port. The capsule manifest
+    /// must allowlist `host:port` via `net_connect`.
+    pub fn connect(addr: &str) -> std::io::Result<Self> {
+        let (host, port) = parse_host_port(addr)?;
+        let inner = wit_net::connect_tcp(host, port).map_err(|e| {
+            std::io::Error::other(format!("{e:?}"))
+        })?;
+        Ok(Self { inner })
+    }
+
+    // ---- Length-prefixed framed I/O (uplink-proxy use case) ----
+
+    /// Read the next length-prefixed frame.
+    pub fn read(&self) -> Result<ReadStatus, SysError> {
+        self.inner.read().map(ReadStatus::from_wit).map_err(host_err)
+    }
+
+    /// Write a length-prefixed frame.
+    pub fn write(&self, data: &[u8]) -> Result<(), SysError> {
+        self.inner.write(data).map_err(host_err)
+    }
+
+    /// Receive the next frame, blocking until one arrives (sleep-polls
+    /// against `read` at 50 ms intervals).
+    ///
+    /// Returns `Err(RecvError)` if the peer has disconnected.
+    /// Analogous to [`std::sync::mpsc::Receiver::recv`].
+    pub fn recv(&self) -> Result<Vec<u8>, RecvError> {
+        loop {
+            match self.try_recv() {
+                Ok(bytes) => return Ok(bytes),
+                Err(TryRecvError::Closed) => return Err(RecvError),
+                Err(TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
         }
     }
-}
 
-/// Receive the next message from the stream without blocking.
-///
-/// Returns:
-/// - `Ok(bytes)` — a message is available
-/// - `Err(TryRecvError::Empty)` — no message ready yet, try again later
-/// - `Err(TryRecvError::Closed)` — peer has disconnected
-///
-/// Analogous to [`std::sync::mpsc::Receiver::try_recv`].
-pub fn try_recv(stream: &StreamHandle) -> Result<Vec<u8>, TryRecvError> {
-    let status = wit_net::net_read(stream.0).map_err(|_| TryRecvError::Closed)?;
-    match status {
-        wit_types::NetReadStatus::Data(bytes) => Ok(bytes),
-        wit_types::NetReadStatus::Closed => Err(TryRecvError::Closed),
-        wit_types::NetReadStatus::Pending => Err(TryRecvError::Empty),
+    /// Non-blocking frame receive.
+    pub fn try_recv(&self) -> Result<Vec<u8>, TryRecvError> {
+        match self.inner.read() {
+            Ok(wit_net::NetReadStatus::Data(bytes)) => Ok(bytes),
+            Ok(wit_net::NetReadStatus::Closed) => Err(TryRecvError::Closed),
+            Ok(wit_net::NetReadStatus::Pending) => Err(TryRecvError::Empty),
+            Err(_) => Err(TryRecvError::Closed),
+        }
+    }
+
+    /// Send a framed message.
+    pub fn send(&self, data: &[u8]) -> Result<(), SendError> {
+        self.inner.write(data).map_err(|_| SendError)
+    }
+
+    // ---- Byte-stream I/O (general protocols) ----
+
+    /// Read up to `max_bytes` from the stream without length-prefix
+    /// framing. Mirrors `std::io::Read::read`.
+    pub fn read_bytes(&self, max_bytes: u32) -> Result<Vec<u8>, SysError> {
+        self.inner.read_bytes(max_bytes).map_err(host_err)
+    }
+
+    /// Write bytes without framing. Returns bytes actually written.
+    pub fn write_bytes(&self, data: &[u8]) -> Result<u32, SysError> {
+        self.inner.write_bytes(data).map_err(host_err)
+    }
+
+    /// Peek up to `max_bytes` without consuming them. Mirrors
+    /// `std::net::TcpStream::peek`.
+    pub fn peek(&self, max_bytes: u32) -> Result<Vec<u8>, SysError> {
+        self.inner.peek(max_bytes).map_err(host_err)
+    }
+
+    // ---- Lifecycle ----
+
+    /// Half-close the read side, write side, or both.
+    pub fn shutdown(&self, how: Shutdown) -> Result<(), SysError> {
+        self.inner.shutdown(how.to_wit()).map_err(host_err)
+    }
+
+    // ---- Address accessors ----
+
+    /// Remote peer address as `"ip:port"`. Returns `host_err("NotTcp")`
+    /// on Unix-domain streams.
+    pub fn peer_addr(&self) -> Result<String, SysError> {
+        self.inner.peer_addr().map_err(host_err)
+    }
+
+    /// Local socket address as `"ip:port"`. Returns `host_err("NotTcp")`
+    /// on Unix-domain streams.
+    pub fn local_addr(&self) -> Result<String, SysError> {
+        self.inner.local_addr().map_err(host_err)
+    }
+
+    // ---- TCP socket options (`not_tcp` on Unix streams) ----
+
+    /// Enable / disable `TCP_NODELAY` (Nagle off when `true`).
+    pub fn set_nodelay(&self, nodelay: bool) -> Result<(), SysError> {
+        self.inner.set_nodelay(nodelay).map_err(host_err)
+    }
+
+    /// Current `TCP_NODELAY` setting.
+    pub fn nodelay(&self) -> Result<bool, SysError> {
+        self.inner.nodelay().map_err(host_err)
+    }
+
+    /// Set the read timeout. `None` clears it; zero-duration is
+    /// rejected (matches `std::net::TcpStream::set_read_timeout`).
+    pub fn set_read_timeout(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), SysError> {
+        let ms = to_host_timeout(timeout)?;
+        self.inner.set_read_timeout(ms).map_err(host_err)
+    }
+
+    /// Current read timeout, or `None` if unset.
+    pub fn read_timeout(&self) -> Result<Option<std::time::Duration>, SysError> {
+        Ok(self
+            .inner
+            .read_timeout()
+            .map_err(host_err)?
+            .map(std::time::Duration::from_millis))
+    }
+
+    /// Set the write timeout. `None` clears it; zero-duration is rejected.
+    pub fn set_write_timeout(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), SysError> {
+        let ms = to_host_timeout(timeout)?;
+        self.inner.set_write_timeout(ms).map_err(host_err)
+    }
+
+    /// Current write timeout, or `None` if unset.
+    pub fn write_timeout(&self) -> Result<Option<std::time::Duration>, SysError> {
+        Ok(self
+            .inner
+            .write_timeout()
+            .map_err(host_err)?
+            .map(std::time::Duration::from_millis))
+    }
+
+    /// Set the IPv6 hop limit / IPv4 TTL on outgoing packets.
+    pub fn set_hop_limit(&self, hops: u32) -> Result<(), SysError> {
+        self.inner.set_hop_limit(hops).map_err(host_err)
+    }
+
+    /// Current IPv6 hop limit / IPv4 TTL.
+    pub fn hop_limit(&self) -> Result<u32, SysError> {
+        self.inner.hop_limit().map_err(host_err)
+    }
+
+    /// Set the TCP keepalive interval. `None` disables; `Some(seconds)`
+    /// enables with the given probe interval.
+    pub fn set_keepalive(&self, keepalive_secs: Option<u64>) -> Result<(), SysError> {
+        self.inner.set_keepalive(keepalive_secs).map_err(host_err)
+    }
+
+    /// Current keepalive setting.
+    pub fn keepalive(&self) -> Result<Option<u64>, SysError> {
+        self.inner.keepalive().map_err(host_err)
+    }
+
+    /// Set `SO_LINGER`. `None` = default graceful close;
+    /// `Some(Duration::ZERO)` = immediate RST drop unsent; `Some(d)` =
+    /// drain up to `d`.
+    pub fn set_linger(&self, linger: Option<std::time::Duration>) -> Result<(), SysError> {
+        let ms = linger.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        self.inner.set_linger(ms).map_err(host_err)
+    }
+
+    /// Current `SO_LINGER` setting.
+    pub fn linger(&self) -> Result<Option<std::time::Duration>, SysError> {
+        Ok(self
+            .inner
+            .linger()
+            .map_err(host_err)?
+            .map(std::time::Duration::from_millis))
+    }
+
+    /// Toggle `SO_REUSEADDR`. Has no effect on outbound streams.
+    pub fn set_reuseaddr(&self, reuse: bool) -> Result<(), SysError> {
+        self.inner.set_reuseaddr(reuse).map_err(host_err)
+    }
+
+    /// Current `SO_REUSEADDR` setting.
+    pub fn reuseaddr(&self) -> Result<bool, SysError> {
+        self.inner.reuseaddr().map_err(host_err)
+    }
+
+    // ---- Deprecated TTL aliases (pre-migration API) ----
+
+    /// Backward-compat alias for [`set_hop_limit`].
+    pub fn set_ttl(&self, ttl: u32) -> Result<(), SysError> {
+        self.set_hop_limit(ttl)
+    }
+
+    /// Backward-compat alias for [`hop_limit`].
+    pub fn ttl(&self) -> Result<u32, SysError> {
+        self.hop_limit()
     }
 }
 
-/// Send a message to the stream.
-///
-/// Returns `Err(SendError)` if the peer has disconnected and the message
-/// could not be delivered.
-///
-/// Analogous to [`std::sync::mpsc::Sender::send`].
-pub fn send(stream: &StreamHandle, data: &[u8]) -> Result<(), SendError> {
-    wit_net::net_write(stream.0, data).map_err(|_| SendError)
+impl std::io::Read for TcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let bytes = self.inner.read_bytes(max).map_err(io_error_from_net_op)?;
+        let n = buf.len().min(bytes.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
+    }
 }
 
-/// Close an open stream, releasing its resources on the host.
+impl std::io::Write for TcpStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write_bytes(buf).map_err(io_error_from_net_op)?;
+        Ok(n as usize)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // The host writes are non-buffered at the SDK layer.
+        Ok(())
+    }
+}
+
+/// A UDP datagram socket.
 ///
-/// Idempotent — closing an already-closed handle is a no-op.
-pub fn close(stream: &StreamHandle) -> Result<(), SysError> {
-    wit_net::net_close_stream(stream.0).map_err(SysError::HostError)
+/// Modes:
+/// - **Unconnected** (default after [`udp_bind`]) — use [`UdpSocket::send_to`]
+///   / [`UdpSocket::recv_from`] with per-call peer addressing.
+/// - **Connected** (after [`UdpSocket::connect`]) — use [`UdpSocket::send`]
+///   / [`UdpSocket::recv`] without per-call peer; faster syscall path
+///   for chatty protocols.
+#[derive(Debug)]
+pub struct UdpSocket {
+    inner: wit_net::UdpSocket,
+}
+
+/// A UDP datagram returned by [`UdpSocket::recv_from`].
+#[derive(Debug, Clone)]
+pub struct UdpDatagram {
+    /// Payload bytes received.
+    pub data: Vec<u8>,
+    /// Peer host (numeric IP).
+    pub peer_host: String,
+    /// Peer UDP port.
+    pub peer_port: u16,
+}
+
+impl UdpSocket {
+    /// Send to a peer (unconnected mode). Returns bytes sent.
+    pub fn send_to(&self, data: &[u8], peer_host: &str, peer_port: u16) -> Result<u32, SysError> {
+        self.inner
+            .send_to(data, peer_host, peer_port)
+            .map_err(host_err)
+    }
+
+    /// Receive up to `max_bytes` (unconnected mode). `None` if no
+    /// datagram arrived within the read timeout.
+    pub fn recv_from(&self, max_bytes: u32) -> Result<Option<UdpDatagram>, SysError> {
+        Ok(self
+            .inner
+            .recv_from(max_bytes)
+            .map_err(host_err)?
+            .map(|d| UdpDatagram {
+                data: d.data,
+                peer_host: d.peer_host,
+                peer_port: d.peer_port,
+            }))
+    }
+
+    /// Lock to a single peer (connected mode). The SSRF airlock runs
+    /// once at connect time.
+    pub fn connect(&self, peer_host: &str, peer_port: u16) -> Result<(), SysError> {
+        self.inner.connect(peer_host, peer_port).map_err(host_err)
+    }
+
+    /// Unbind from the connected peer; revert to unconnected mode.
+    pub fn disconnect(&self) -> Result<(), SysError> {
+        self.inner.disconnect().map_err(host_err)
+    }
+
+    /// Send to the connected peer (connected mode). Returns bytes sent.
+    pub fn send(&self, data: &[u8]) -> Result<u32, SysError> {
+        self.inner.send(data).map_err(host_err)
+    }
+
+    /// Receive from the connected peer. `None` if no datagram arrived
+    /// within the read timeout.
+    pub fn recv(&self, max_bytes: u32) -> Result<Option<Vec<u8>>, SysError> {
+        self.inner.recv(max_bytes).map_err(host_err)
+    }
+
+    /// Currently connected peer as `"ip:port"`. `None` if unconnected.
+    pub fn peer_addr(&self) -> Result<Option<String>, SysError> {
+        self.inner.peer_addr().map_err(host_err)
+    }
+
+    /// Set the read timeout for `recv_from` / `recv`. `None` clears.
+    pub fn set_read_timeout(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), SysError> {
+        let ms = to_host_timeout(timeout)?;
+        self.inner.set_read_timeout(ms).map_err(host_err)
+    }
+
+    /// Local bound address as `"ip:port"`.
+    pub fn local_addr(&self) -> Result<String, SysError> {
+        self.inner.local_addr().map_err(host_err)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Outbound TCP — std::net::TcpStream parity
+// Factory functions
 // ---------------------------------------------------------------------------
 
-/// Direction argument for [`TcpStream::shutdown`] — mirror of
-/// [`std::net::Shutdown`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shutdown {
-    /// Half-close the read side.
-    Read,
-    /// Half-close the write side.
-    Write,
-    /// Close both directions.
-    Both,
-}
-
-/// Open an outbound TCP connection to `host:port` and return a stream handle.
+/// Bind and activate the capsule's pre-provisioned Unix-domain listener.
 ///
-/// The capsule's `Capsule.toml` must declare a `net_connect` allowlist entry
-/// matching `host:port` (exact `"host:port"` or `"host:*"`); missing or empty
-/// allowlist denies all outbound TCP. The kernel runs the same SSRF airlock
-/// used by `http-request` on the resolved IP and enforces a connect timeout
-/// (10s default).
+/// The kernel pre-binds the socket at capsule load time; this call
+/// activates it. Returns a [`UnixListener`] whose `Drop` releases the
+/// resource.
+pub fn bind_unix() -> Result<UnixListener, SysError> {
+    let inner = wit_net::bind_unix().map_err(host_err)?;
+    Ok(UnixListener { inner })
+}
+
+/// Bind a TCP listener for inbound connections.
 ///
-/// The returned handle flows through the byte-stream surface
-/// ([`read_bytes`] / [`write_bytes`] / [`close`]) and the std-shaped
-/// [`TcpStream`] facade. The frame-oriented [`recv`] / [`send`] also work
-/// but are intended for the inbound Unix-accept proxy use case.
-pub fn connect(host: &str, port: u16) -> Result<StreamHandle, SysError> {
-    let handle = wit_net::net_connect_tcp(host, port).map_err(SysError::HostError)?;
-    Ok(StreamHandle(handle))
+/// Restricted by the `net_tcp_bind` capability allowlist. Port `0`
+/// selects an ephemeral port.
+pub fn bind_tcp(host: &str, port: u16) -> Result<TcpListener, SysError> {
+    let inner = wit_net::bind_tcp(host, port).map_err(host_err)?;
+    Ok(TcpListener { inner })
 }
 
-/// Read up to `max_bytes` from `stream` without length-prefix framing.
-///
-/// Mirrors `std::io::Read::read`. Empty result means EOF (peer
-/// disconnected). Honours any read timeout previously set via
-/// [`set_read_timeout`].
-pub fn read_bytes(stream: &StreamHandle, max_bytes: u32) -> Result<Vec<u8>, SysError> {
-    wit_net::net_read_bytes(stream.0, max_bytes).map_err(SysError::HostError)
+/// Open an outbound TCP connection. Requires `net_connect` allowlist
+/// match.
+pub fn connect(host: &str, port: u16) -> Result<TcpStream, SysError> {
+    let inner = wit_net::connect_tcp(host, port).map_err(host_err)?;
+    Ok(TcpStream { inner })
 }
 
-/// Write `data` to `stream` without framing. Returns the number of bytes
-/// actually written (may be less than `data.len()`). Honours any write
-/// timeout previously set via [`set_write_timeout`].
-pub fn write_bytes(stream: &StreamHandle, data: &[u8]) -> Result<u32, SysError> {
-    wit_net::net_write_bytes(stream.0, data).map_err(SysError::HostError)
+/// Bind a UDP socket. Requires `net_udp` allowlist match.
+pub fn udp_bind(host: &str, port: u16) -> Result<UdpSocket, SysError> {
+    let inner = wit_net::udp_bind(host, port).map_err(host_err)?;
+    Ok(UdpSocket { inner })
 }
 
-/// Peek up to `max_bytes` without consuming them — the next
-/// [`read_bytes`] returns the same data again.
-pub fn peek(stream: &StreamHandle, max_bytes: u32) -> Result<Vec<u8>, SysError> {
-    wit_net::net_peek(stream.0, max_bytes).map_err(SysError::HostError)
+/// Resolve a hostname to a list of `"ip:port"` (or `"ip"`) strings.
+/// SSRF airlock applies — private/loopback/etc. ranges are stripped.
+pub fn lookup_host(host: &str) -> Result<Vec<String>, SysError> {
+    wit_net::lookup_host(host).map_err(host_err)
 }
 
-/// Half-close the read side, write side, or both.
-pub fn shutdown(stream: &StreamHandle, how: Shutdown) -> Result<(), SysError> {
-    let wit_how = match how {
-        Shutdown::Read => wit_types::ShutdownHow::Read,
-        Shutdown::Write => wit_types::ShutdownHow::Write,
-        Shutdown::Both => wit_types::ShutdownHow::Both,
-    };
-    wit_net::net_shutdown(stream.0, wit_how).map_err(SysError::HostError)
-}
-
-/// Remote peer address, formatted as `"ip:port"`.
-pub fn peer_addr(stream: &StreamHandle) -> Result<String, SysError> {
-    wit_net::net_peer_addr(stream.0).map_err(SysError::HostError)
-}
-
-/// Local socket address, formatted as `"ip:port"`.
-pub fn local_addr(stream: &StreamHandle) -> Result<String, SysError> {
-    wit_net::net_local_addr(stream.0).map_err(SysError::HostError)
-}
-
-/// Toggle `TCP_NODELAY` (Nagle off when `true`).
-pub fn set_nodelay(stream: &StreamHandle, nodelay: bool) -> Result<(), SysError> {
-    wit_net::net_set_nodelay(stream.0, nodelay).map_err(SysError::HostError)
-}
-
-/// Current `TCP_NODELAY` setting.
-pub fn nodelay(stream: &StreamHandle) -> Result<bool, SysError> {
-    wit_net::net_nodelay(stream.0).map_err(SysError::HostError)
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /// Validate + convert a timeout to milliseconds for the host fn.
 ///
@@ -254,205 +547,16 @@ fn to_host_timeout(timeout: Option<std::time::Duration>) -> Result<Option<u64>, 
     }
 }
 
-/// Set the read timeout. `None` clears it; `Some(Duration::ZERO)` is
-/// rejected (matches `std::net::TcpStream::set_read_timeout`).
-pub fn set_read_timeout(
-    stream: &StreamHandle,
-    timeout: Option<std::time::Duration>,
-) -> Result<(), SysError> {
-    let ms = to_host_timeout(timeout)?;
-    wit_net::net_set_read_timeout(stream.0, ms).map_err(SysError::HostError)
-}
-
-/// Current read timeout, or `None` if unset.
-pub fn read_timeout(stream: &StreamHandle) -> Result<Option<std::time::Duration>, SysError> {
-    Ok(wit_net::net_read_timeout(stream.0)
-        .map_err(SysError::HostError)?
-        .map(std::time::Duration::from_millis))
-}
-
-/// Set the write timeout. `None` clears it; `Some(Duration::ZERO)` is
-/// rejected (matches `std::net::TcpStream::set_write_timeout`).
-pub fn set_write_timeout(
-    stream: &StreamHandle,
-    timeout: Option<std::time::Duration>,
-) -> Result<(), SysError> {
-    let ms = to_host_timeout(timeout)?;
-    wit_net::net_set_write_timeout(stream.0, ms).map_err(SysError::HostError)
-}
-
-/// Current write timeout, or `None` if unset.
-pub fn write_timeout(stream: &StreamHandle) -> Result<Option<std::time::Duration>, SysError> {
-    Ok(wit_net::net_write_timeout(stream.0)
-        .map_err(SysError::HostError)?
-        .map(std::time::Duration::from_millis))
-}
-
-/// Set the IP TTL on outgoing packets.
-pub fn set_ttl(stream: &StreamHandle, ttl: u32) -> Result<(), SysError> {
-    wit_net::net_set_ttl(stream.0, ttl).map_err(SysError::HostError)
-}
-
-/// Current IP TTL.
-pub fn ttl(stream: &StreamHandle) -> Result<u32, SysError> {
-    wit_net::net_ttl(stream.0).map_err(SysError::HostError)
-}
-
-/// A connected TCP stream — the SDK analogue of [`std::net::TcpStream`].
-///
-/// Owns a [`StreamHandle`] from [`connect`] and implements
-/// [`std::io::Read`] and [`std::io::Write`] over the host's byte-stream
-/// `net-read-bytes` / `net-write-bytes` (no length-prefix framing). Generic
-/// code that operates on any `Read + Write` (TLS clients, WebSocket
-/// libraries, Postgres drivers) works unmodified.
-///
-/// The host closes the underlying stream when this value is dropped, so
-/// `TcpStream` is RAII — no explicit close required.
-///
-/// # Example
-///
-/// ```no_run
-/// use astrid_sdk::net::TcpStream;
-/// use std::io::{Read, Write};
-///
-/// let mut sock = TcpStream::connect("fulcrum.unicity.network:443")?;
-/// sock.set_nodelay(true)?;
-/// sock.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")?;
-///
-/// let mut buf = vec![0u8; 4096];
-/// let n = sock.read(&mut buf)?;
-/// # Ok::<(), std::io::Error>(())
-/// ```
-#[derive(Debug)]
-pub struct TcpStream {
-    handle: StreamHandle,
-}
-
-impl TcpStream {
-    /// Open a TCP connection to `addr`, formatted as `"host:port"`.
-    ///
-    /// DNS resolution and the SSRF airlock run host-side; the WASM guest
-    /// only sees the parsed host and port.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`std::io::Error`] wrapping the host-side failure
-    /// (capability denial, SSRF rejection, DNS failure, connect timeout,
-    /// or remote refusal).
-    pub fn connect<A: AsRef<str>>(addr: A) -> std::io::Result<Self> {
-        let (host, port) = parse_host_port(addr.as_ref())?;
-        let handle = connect(host, port).map_err(io_error_from_sys)?;
-        Ok(Self { handle })
-    }
-
-    /// Wrap an existing [`StreamHandle`] in the `TcpStream` facade. The
-    /// `TcpStream` takes ownership and will close the handle on drop.
-    #[must_use]
-    pub fn from_handle(handle: StreamHandle) -> Self {
-        Self { handle }
-    }
-
-    /// The raw stream handle. Use the free functions in this module if you
-    /// need the byte-stream surface directly.
-    #[must_use]
-    pub fn handle(&self) -> &StreamHandle {
-        &self.handle
-    }
-
-    /// Set the `TCP_NODELAY` socket option (Nagle's algorithm off when `true`).
-    pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
-        set_nodelay(&self.handle, nodelay).map_err(io_error_from_sys)
-    }
-
-    /// Read the current `TCP_NODELAY` setting.
-    pub fn nodelay(&self) -> std::io::Result<bool> {
-        nodelay(&self.handle).map_err(io_error_from_sys)
-    }
-
-    /// Set the read timeout. `None` clears it.
-    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
-        set_read_timeout(&self.handle, timeout).map_err(io_error_from_sys)
-    }
-
-    /// Current read timeout.
-    pub fn read_timeout(&self) -> std::io::Result<Option<std::time::Duration>> {
-        read_timeout(&self.handle).map_err(io_error_from_sys)
-    }
-
-    /// Set the write timeout. `None` clears it.
-    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
-        set_write_timeout(&self.handle, timeout).map_err(io_error_from_sys)
-    }
-
-    /// Current write timeout.
-    pub fn write_timeout(&self) -> std::io::Result<Option<std::time::Duration>> {
-        write_timeout(&self.handle).map_err(io_error_from_sys)
-    }
-
-    /// Set the IP `TTL` on outgoing packets.
-    pub fn set_ttl(&self, ttl_val: u32) -> std::io::Result<()> {
-        set_ttl(&self.handle, ttl_val).map_err(io_error_from_sys)
-    }
-
-    /// Current IP `TTL`.
-    pub fn ttl(&self) -> std::io::Result<u32> {
-        ttl(&self.handle).map_err(io_error_from_sys)
-    }
-
-    /// Remote peer address as `"ip:port"`.
-    pub fn peer_addr(&self) -> std::io::Result<String> {
-        peer_addr(&self.handle).map_err(io_error_from_sys)
-    }
-
-    /// Local socket address as `"ip:port"`.
-    pub fn local_addr(&self) -> std::io::Result<String> {
-        local_addr(&self.handle).map_err(io_error_from_sys)
-    }
-
-    /// Half-close the read side, write side, or both.
-    pub fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
-        shutdown(&self.handle, how).map_err(io_error_from_sys)
-    }
-
-    /// Peek up to `buf.len()` bytes without consuming them. Returns the
-    /// number of bytes written into `buf`. `Ok(0)` is EOF (matches
-    /// `std::net::TcpStream::peek`). If a read timeout is set and it
-    /// expires with no data, returns
-    /// [`std::io::ErrorKind::WouldBlock`].
-    pub fn peek(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let bytes = peek(&self.handle, max).map_err(io_error_from_net_op)?;
-        let n = buf.len().min(bytes.len());
-        buf[..n].copy_from_slice(&bytes[..n]);
-        Ok(n)
-    }
-}
-
-impl std::io::Read for TcpStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let bytes = read_bytes(&self.handle, max).map_err(io_error_from_net_op)?;
-        let n = buf.len().min(bytes.len());
-        buf[..n].copy_from_slice(&bytes[..n]);
-        Ok(n)
-    }
-}
-
-impl std::io::Write for TcpStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = write_bytes(&self.handle, buf).map_err(io_error_from_net_op)?;
-        Ok(n as usize)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        // The host writes are non-buffered at the SDK layer.
-        Ok(())
-    }
-}
-
-impl Drop for TcpStream {
-    fn drop(&mut self) {
-        let _ = close(&self.handle);
+/// `io::Error` from a network-op `SysError`. Maps `WouldBlock`-flavoured
+/// host errors to [`std::io::ErrorKind::WouldBlock`] so std-style
+/// callers can distinguish "timeout fired, retry" from a real EOF or
+/// transport error.
+fn io_error_from_net_op<E: core::fmt::Debug>(err: E) -> std::io::Error {
+    let msg = format!("{err:?}");
+    if msg.contains("WouldBlock") || msg.contains("would block") {
+        std::io::Error::new(std::io::ErrorKind::WouldBlock, msg)
+    } else {
+        std::io::Error::other(msg)
     }
 }
 
@@ -497,24 +601,6 @@ fn parse_port(port_str: &str) -> std::io::Result<u16> {
     })
 }
 
-fn io_error_from_sys(err: SysError) -> std::io::Error {
-    std::io::Error::other(err.to_string())
-}
-
-/// `io::Error` from a network-op `SysError`, mapping the host's
-/// `"... would block"` sentinel to [`std::io::ErrorKind::WouldBlock`]
-/// so std-style callers (`Read::read`, `Write::write`, `peek`) can
-/// distinguish "timeout fired, retry" from a real EOF or transport
-/// error.
-fn io_error_from_net_op(err: SysError) -> std::io::Error {
-    let msg = err.to_string();
-    if msg.contains("would block") {
-        std::io::Error::new(std::io::ErrorKind::WouldBlock, msg)
-    } else {
-        std::io::Error::other(msg)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,10 +621,6 @@ mod tests {
 
     #[test]
     fn parse_host_port_ipv6_without_brackets_fails_cleanly() {
-        // `2001:db8::1:443` is ambiguous (no brackets, multiple colons).
-        // rsplit_once takes the last colon — the port parse then fails
-        // because `:1` precedes it. We accept this; brackets are the
-        // unambiguous form.
         assert!(parse_host_port("2001:db8::1:abc").is_err());
     }
 
@@ -566,17 +648,5 @@ mod tests {
             to_host_timeout(Some(std::time::Duration::from_millis(500))).unwrap(),
             Some(500)
         );
-    }
-
-    #[test]
-    fn io_error_from_net_op_maps_would_block() {
-        let err = io_error_from_net_op(SysError::HostError("read would block".into()));
-        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
-    }
-
-    #[test]
-    fn io_error_from_net_op_other_passes_through() {
-        let err = io_error_from_net_op(SysError::HostError("dns: no addresses".into()));
-        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 }

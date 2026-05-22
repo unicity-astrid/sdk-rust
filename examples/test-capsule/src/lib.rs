@@ -12,9 +12,11 @@
 
 use astrid_sdk::prelude::*;
 
-// Generate Rust types from WIT event definitions.
-// This produces `TestEvent` (struct) and `Severity` (enum).
+// Generate Rust types from WIT event definitions. The macro emits one
+// `pub mod <interface>` per WIT interface to avoid name collisions
+// across the canonical contract set.
 wit_events!("wit/events.wit");
+use events::TestEvent;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct TestCapsule {

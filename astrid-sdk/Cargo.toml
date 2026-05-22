@@ -18,6 +18,9 @@ schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# `request_response` uses uuid v4 for correlation IDs. js feature enables
+# the wasm-bindgen-free RNG path for `wasm32-wasip2`.
+uuid = { version = "1.10", default-features = false, features = ["v4"] }
 
 [features]
 default = ["derive"]

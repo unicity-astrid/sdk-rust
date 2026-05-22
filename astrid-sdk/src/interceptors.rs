@@ -1,12 +1,22 @@
-//\! Interceptor handle registry — runtime-managed subscription handles
-//\! that map to interceptor handler actions declared in `Capsule.toml`.
+//! Interceptor binding registry — metadata for the kernel-managed
+//! interceptor subscriptions a capsule declared in `Capsule.toml`.
+//!
+//! Under the per-domain ABI, interceptor events are delivered to the
+//! capsule through `astrid-hook-trigger` rather than a run-loop IPC
+//! subscription. The host fn `get-interceptor-bindings` returns
+//! metadata-only — capsules use it to enumerate the (action, topic)
+//! pairs they're subscribed to for debugging, introspection, and
+//! tooling. `handle-id` is the kernel-side registry handle and is not
+//! convertible into an [`ipc::Subscription`]; it's surfaced for log
+//! correlation only.
 
 use super::*;
 
 /// A single interceptor subscription binding.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InterceptorBinding {
-    /// The IPC subscription handle ID.
+    /// Kernel-side subscription registry ID (opaque; for log
+    /// correlation). NOT an [`ipc::Subscription`] handle.
     pub handle_id: u64,
     /// The interceptor action name from the manifest.
     pub action: String,
@@ -15,13 +25,8 @@ pub struct InterceptorBinding {
 }
 
 impl InterceptorBinding {
-    /// Return a subscription handle for use with [`ipc::poll`] / [`ipc::recv`].
-    #[must_use]
-    pub fn subscription_handle(&self) -> ipc::SubscriptionHandle {
-        ipc::SubscriptionHandle(self.handle_id)
-    }
-
-    /// Return the raw handle ID bytes (for lower-level interop).
+    /// Return the raw handle ID bytes (for lower-level interop / log
+    /// correlation).
     #[must_use]
     pub fn handle_bytes(&self) -> Vec<u8> {
         self.handle_id.to_string().into_bytes()
@@ -30,10 +35,12 @@ impl InterceptorBinding {
 
 /// Query the runtime for auto-subscribed interceptor handles.
 ///
-/// Returns an empty vec if this capsule has no auto-subscribed interceptors
-/// (i.e. it does not have both `run()` and `[[interceptor]]`).
+/// Returns an empty vec if this capsule has no auto-subscribed
+/// interceptors (i.e. it does not have both `run()` and
+/// `[[interceptor]]`). Each entry maps an action name to the IPC
+/// topic the kernel routes through `astrid-hook-trigger`.
 pub fn bindings() -> Result<Vec<InterceptorBinding>, SysError> {
-    let handles = wit_ipc::get_interceptor_handles().map_err(SysError::HostError)?;
+    let handles = wit_ipc::get_interceptor_bindings().map_err(host_err)?;
     Ok(handles
         .into_iter()
         .map(|h| InterceptorBinding {
@@ -42,23 +49,4 @@ pub fn bindings() -> Result<Vec<InterceptorBinding>, SysError> {
             topic: h.topic,
         })
         .collect())
-}
-
-/// Poll all interceptor subscriptions and dispatch pending events.
-///
-/// For each binding with pending messages, calls
-/// `handler(action, messages)` once with the typed [`ipc::PollResult`].
-/// Bindings with no pending messages are skipped.
-pub fn poll(
-    bindings: &[InterceptorBinding],
-    mut handler: impl FnMut(&str, &ipc::PollResult),
-) -> Result<(), SysError> {
-    for binding in bindings {
-        let handle = binding.subscription_handle();
-        let result = ipc::poll(&handle)?;
-        if !result.messages.is_empty() {
-            handler(&binding.action, &result);
-        }
-    }
-    Ok(())
 }

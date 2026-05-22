@@ -1,9 +1,16 @@
-//\! Multi-platform identity resolve / link / list-links.
+//! Multi-platform identity resolve / link / list-links.
+//!
+//! Maps external platform identities (Discord user, GitHub user, etc.)
+//! to internal Astrid user IDs. Backed by the typed
+//! `astrid:identity/host@1.0.0` package. The host returns typed
+//! `error-code` variants; this wrapper translates `link-not-found` on
+//! resolve into `Ok(None)` so calling code uses idiomatic Rust
+//! option semantics for the common "is this user linked?" branch.
 
 use super::*;
 
 /// A resolved Astrid user returned by [`resolve`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvedUser {
     /// The Astrid-native user ID (UUID).
     pub user_id: String,
@@ -12,7 +19,12 @@ pub struct ResolvedUser {
 }
 
 /// A platform-to-Astrid identity link.
-#[derive(Debug)]
+///
+/// `astrid_user_id` is the identity this link belongs to; it's filled
+/// in by the SDK from the [`list_links`] caller argument (the WIT
+/// `platform-link` record does not carry it since the call already
+/// scopes to a single user).
+#[derive(Debug, Clone)]
 pub struct Link {
     /// Platform name (e.g. "discord", "twitch").
     pub platform: String,
@@ -29,28 +41,26 @@ pub struct Link {
 /// Resolve a platform user to an Astrid user.
 ///
 /// Returns `Ok(Some(user))` if the platform identity is linked,
-/// `Ok(None)` if not found. Requires `identity = ["resolve"]` or higher.
+/// `Ok(None)` if no link exists. Requires `identity = ["resolve"]` or
+/// higher.
 pub fn resolve(
     platform: &str,
     platform_user_id: &str,
 ) -> Result<Option<ResolvedUser>, SysError> {
-    let request = wit_types::IdentityResolveRequest {
+    let request = wit_identity::IdentityResolveRequest {
         platform: platform.to_string(),
         platform_user_id: platform_user_id.to_string(),
     };
-    let resp = wit_identity::identity_resolve(&request).map_err(SysError::HostError)?;
-    if resp.found {
-        let user_id = resp.user_id.ok_or_else(|| {
-            SysError::ApiError("host returned found=true but user_id was missing".into())
-        })?;
-        Ok(Some(ResolvedUser {
-            user_id,
+    match wit_identity::identity_resolve(&request) {
+        Ok(resp) => Ok(Some(ResolvedUser {
+            user_id: resp.user_id,
             display_name: resp.display_name,
-        }))
-    } else if let Some(err) = resp.error {
-        Err(SysError::ApiError(err))
-    } else {
-        Ok(None)
+        })),
+        // The new contract surfaces "no such link" as a typed error
+        // variant rather than the pre-migration found:false flag.
+        // Treat it as a not-found, not an error.
+        Err(wit_identity::ErrorCode::LinkNotFound) => Ok(None),
+        Err(e) => Err(host_err(e)),
     }
 }
 
@@ -58,103 +68,67 @@ pub fn resolve(
 ///
 /// - `method` describes how the link was established (e.g. "chat_command", "system").
 ///
-/// Requires `identity = ["link"]` or higher.
+/// Requires `identity = ["link"]` or higher. Returns an error with the
+/// host-side `AlreadyLinked` variant in the message if this
+/// (platform, platform_user_id) pair is already linked.
 pub fn link(
     platform: &str,
     platform_user_id: &str,
     astrid_user_id: &str,
     method: &str,
 ) -> Result<(), SysError> {
-    let request = wit_types::IdentityLinkRequest {
+    let request = wit_identity::IdentityLinkRequest {
         platform: platform.to_string(),
         platform_user_id: platform_user_id.to_string(),
         astrid_user_id: astrid_user_id.to_string(),
         method: method.to_string(),
     };
-    let resp = wit_identity::identity_link(&request).map_err(SysError::HostError)?;
-    if !resp.ok {
-        return Err(SysError::ApiError(
-            resp.error.unwrap_or_else(|| "identity link failed".into()),
-        ));
-    }
-    Ok(())
+    wit_identity::identity_link(&request).map_err(host_err)
 }
 
 /// Unlink a platform identity from its Astrid user.
 ///
-/// Returns `true` if a link was removed, `false` if none existed.
-/// Requires `identity = ["link"]` or higher.
+/// Returns `Ok(true)` if a link was removed, `Ok(false)` if no link
+/// existed. Other failures (capability, store-unavailable, etc.) are
+/// returned as `Err`. Requires `identity = ["link"]` or higher.
 pub fn unlink(platform: &str, platform_user_id: &str) -> Result<bool, SysError> {
-    let request = wit_types::IdentityUnlinkRequest {
+    let request = wit_identity::IdentityUnlinkRequest {
         platform: platform.to_string(),
         platform_user_id: platform_user_id.to_string(),
     };
-    let resp = wit_identity::identity_unlink(&request).map_err(SysError::HostError)?;
-    if !resp.ok {
-        return Err(SysError::ApiError(
-            resp.error
-                .unwrap_or_else(|| "identity unlink failed".into()),
-        ));
+    match wit_identity::identity_unlink(&request) {
+        Ok(()) => Ok(true),
+        Err(wit_identity::ErrorCode::LinkNotFound) => Ok(false),
+        Err(e) => Err(host_err(e)),
     }
-    Ok(resp.removed.unwrap_or(false))
 }
 
 /// Create a new Astrid user.
 ///
-/// Returns the UUID of the newly created user.
-/// Requires `identity = ["admin"]`.
+/// Returns the UUID of the newly created user. Requires
+/// `identity = ["admin"]`.
 pub fn create_user(display_name: Option<&str>) -> Result<String, SysError> {
-    let request = wit_types::IdentityCreateUserRequest {
-        display_name: display_name.map(|s| s.to_string()),
+    let request = wit_identity::IdentityCreateUserRequest {
+        display_name: display_name.map(str::to_string),
     };
-    let resp = wit_identity::identity_create_user(&request).map_err(SysError::HostError)?;
-    if !resp.ok {
-        return Err(SysError::ApiError(
-            resp.error
-                .unwrap_or_else(|| "identity create_user failed".into()),
-        ));
-    }
-    resp.user_id
-        .ok_or_else(|| SysError::ApiError("missing user_id in response".into()))
+    let resp = wit_identity::identity_create_user(&request).map_err(host_err)?;
+    Ok(resp.user_id)
 }
 
 /// List all platform links for an Astrid user.
 ///
-/// Returns all linked platform identities for the given user UUID.
-/// Requires `identity = ["link"]` or higher.
+/// Returns the (possibly empty) list of linked platform identities for
+/// the given user UUID. Requires `identity = ["link"]` or higher.
 pub fn list_links(astrid_user_id: &str) -> Result<Vec<Link>, SysError> {
-    let request = wit_types::IdentityListLinksRequest {
-        astrid_user_id: astrid_user_id.to_string(),
-    };
-    let resp = wit_identity::identity_list_links(&request).map_err(SysError::HostError)?;
-    if !resp.ok {
-        return Err(SysError::ApiError(
-            resp.error
-                .unwrap_or_else(|| "identity list_links failed".into()),
-        ));
-    }
-    // Parse links from the links_json field.
-    if let Some(json_str) = &resp.links_json {
-        #[derive(Deserialize)]
-        struct LinkInfo {
-            platform: String,
-            platform_user_id: String,
-            astrid_user_id: String,
-            linked_at: String,
-            method: String,
-        }
-        let links: Vec<LinkInfo> = serde_json::from_str(json_str)?;
-        Ok(links
-            .into_iter()
-            .map(|l| Link {
-                platform: l.platform,
-                platform_user_id: l.platform_user_id,
-                astrid_user_id: l.astrid_user_id,
-                linked_at: l.linked_at,
-                method: l.method,
-            })
-            .collect())
-    } else {
-        Ok(Vec::new())
-    }
+    let links = wit_identity::identity_list_links(astrid_user_id).map_err(host_err)?;
+    Ok(links
+        .into_iter()
+        .map(|l| Link {
+            platform: l.platform,
+            platform_user_id: l.platform_user_id,
+            astrid_user_id: astrid_user_id.to_string(),
+            linked_at: l.linked_at,
+            method: l.method,
+        })
+        .collect())
 }
