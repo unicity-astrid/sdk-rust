@@ -207,7 +207,10 @@ impl TcpStream {
                 Ok(bytes) => return Ok(bytes),
                 Err(TryRecvError::Closed) => return Err(RecvError),
                 Err(TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // `std::thread::sleep` panics on wasm32-unknown-unknown
+                    // ("time not implemented on this platform"). Route the
+                    // poll-interval wait through the audited host clock.
+                    let _ = crate::time::sleep(std::time::Duration::from_millis(50));
                 }
             }
         }
