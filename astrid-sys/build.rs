@@ -55,7 +55,10 @@ fn main() {
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !file_name.ends_with(".wit") {
+        if !std::path::Path::new(file_name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
+        {
             continue;
         }
         let stem = file_name.trim_end_matches(".wit");

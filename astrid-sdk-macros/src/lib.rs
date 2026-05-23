@@ -847,18 +847,22 @@ fn capsule_impl(
 
         impl ::astrid_sdk::astrid_sys::Guest for __AstridExport {
             fn astrid_hook_trigger(action: String, payload: Vec<u8>) -> ::astrid_sdk::astrid_sys::CapsuleResult {
+                ::astrid_sdk::install_panic_handler();
                 #hook_trigger_body
             }
 
             fn run() {
+                ::astrid_sdk::install_panic_handler();
                 #run_body
             }
 
             fn astrid_install() {
+                ::astrid_sdk::install_panic_handler();
                 #install_body
             }
 
             fn astrid_upgrade() {
+                ::astrid_sdk::install_panic_handler();
                 #upgrade_body
             }
         }
