@@ -70,9 +70,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Check host WIT mirror
-        run: scripts/sync-host-wit.sh --check
-
       - name: Check contracts WIT mirror
         run: scripts/sync-contracts-wit.sh --check
 

@@ -40,12 +40,3 @@ unsafe_code = "deny"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 arithmetic_side_effects = "deny"
-
-# Local-development path overrides. astrid-types (which capsules and the
-# SDK pull as a shared-types crate) is patched to the in-tree
-# `core/crates/astrid-types` so the post-PR#752 split (kernel-management
-# types moved to `astrid-core::kernel_api`) flows through to capsule
-# builds without waiting on a crates.io publish. The version bump to
-# 0.6 in `[workspace.dependencies]` above makes the patch resolvable.
-[patch.crates-io]
-astrid-types = { path = "../core/crates/astrid-types" }

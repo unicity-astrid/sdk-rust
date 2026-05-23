@@ -10,6 +10,7 @@
 package astrid:contracts@1.0.0;
 
 // ── types ──────────────────────────────────────────────────────────
+package astrid-bus:types@1.0.0;
 
 /// Shared types used across Astrid interfaces.
 ///
@@ -79,6 +80,7 @@ interface types {
 }
 
 // ── agent ──────────────────────────────────────────────────────────
+package astrid-bus:agent@1.0.0;
 
 /// Agent interface — runtime envelopes the agent loop publishes for uplinks.
 ///
@@ -109,6 +111,7 @@ interface agent {
 }
 
 // ── approval ──────────────────────────────────────────────────────────
+package astrid-bus:approval@1.0.0;
 
 /// Approval interface — human-in-the-loop authorization envelopes.
 ///
@@ -144,6 +147,7 @@ interface approval {
 }
 
 // ── client ──────────────────────────────────────────────────────────
+package astrid-bus:client@1.0.0;
 
 /// Client interface — connection lifecycle envelopes for uplinks.
 ///
@@ -165,6 +169,7 @@ interface client {
 }
 
 // ── context ──────────────────────────────────────────────────────────
+package astrid-bus:context@1.0.0;
 
 /// Context interface — conversation compaction and token management.
 ///
@@ -172,7 +177,7 @@ interface client {
 /// requests and publishes compaction responses and hooks for plugin
 /// capsules to influence compaction behaviour.
 interface context {
-    use types.{message};
+    use astrid-bus:types/types.{message};
 
     /// Request to compact messages within a token budget.
     record compact-request {
@@ -229,6 +234,7 @@ interface context {
 }
 
 // ── elicit ──────────────────────────────────────────────────────────
+package astrid-bus:elicit@1.0.0;
 
 /// Elicit interface — interactive user input during a capsule lifecycle hook.
 ///
@@ -238,7 +244,7 @@ interface context {
 /// `elicit` syscall (which is the in-capsule API) — these envelopes carry
 /// the same flow over the IPC bus for uplink consumption.
 interface elicit {
-    use onboarding.{field};
+    use astrid-bus:onboarding/onboarding.{field};
 
     /// A lifecycle hook is requesting user input.
     record request {
@@ -262,6 +268,7 @@ interface elicit {
 }
 
 // ── hook ──────────────────────────────────────────────────────────
+package astrid-bus:hook@1.0.0;
 
 /// Hook interface — maps kernel lifecycle events to semantic hooks.
 ///
@@ -299,14 +306,15 @@ interface hook {
 }
 
 // ── llm ──────────────────────────────────────────────────────────
+package astrid-bus:llm@1.0.0;
 
 /// LLM interface — streaming text generation with tool use support.
 ///
 /// A capsule exporting this interface handles `llm.v1.request.generate.*`
 /// events and publishes `llm.v1.stream.*` streaming responses.
 interface llm {
-    use types.{message, tool-definition, usage};
-    use registry.{provider-entry};
+    use astrid-bus:types/types.{message, tool-definition, usage};
+    use astrid-bus:registry/registry.{provider-entry};
 
     /// Request asking an LLM-provider capsule to describe itself.
     /// Topic: `llm.v1.request.describe`. The registry capsule fans this
@@ -382,6 +390,7 @@ interface llm {
 }
 
 // ── onboarding ──────────────────────────────────────────────────────────
+package astrid-bus:onboarding@1.0.0;
 
 /// Onboarding interface — env-var collection at install / first-run.
 ///
@@ -428,6 +437,7 @@ interface onboarding {
 }
 
 // ── prompt ──────────────────────────────────────────────────────────
+package astrid-bus:prompt@1.0.0;
 
 /// Prompt interface — assembles LLM prompts with plugin hooks.
 ///
@@ -435,7 +445,7 @@ interface onboarding {
 /// and publishes assembled prompts, with before/after hooks for context
 /// injection by plugin capsules.
 interface prompt {
-    use types.{message, tool-definition};
+    use astrid-bus:types/types.{message, tool-definition};
 
     /// Request to assemble a prompt for LLM generation.
     record assemble-request {
@@ -486,6 +496,7 @@ interface prompt {
 }
 
 // ── registry ──────────────────────────────────────────────────────────
+package astrid-bus:registry@1.0.0;
 
 /// Registry interface — LLM provider discovery and model management.
 ///
@@ -548,6 +559,7 @@ interface registry {
 }
 
 // ── session ──────────────────────────────────────────────────────────
+package astrid-bus:session@1.0.0;
 
 /// Session protocol — persistent conversation history management.
 ///
@@ -555,7 +567,7 @@ interface registry {
 /// events and publishes `session.v1.response.*` replies scoped by
 /// correlation ID.
 interface session {
-    use types.{message};
+    use astrid-bus:types/types.{message};
 
     /// Request to fetch conversation history.
     record get-messages-request {
@@ -601,6 +613,7 @@ interface session {
 }
 
 // ── spark ──────────────────────────────────────────────────────────
+package astrid-bus:spark@1.0.0;
 
 /// Spark interface — agent persona and system prompt construction.
 ///
@@ -625,6 +638,7 @@ interface spark {
 }
 
 // ── system ──────────────────────────────────────────────────────────
+package astrid-bus:system@1.0.0;
 
 /// System interface — kernel-emitted lifecycle, health, and CLI envelopes.
 ///
@@ -679,6 +693,7 @@ interface system {
 }
 
 // ── tool ──────────────────────────────────────────────────────────
+package astrid-bus:tool@1.0.0;
 
 /// Tool interface — dispatches tool calls to capsule handlers.
 ///
@@ -686,7 +701,7 @@ interface system {
 /// routes to the appropriate tool capsule via `tool.v1.execute.<name>`,
 /// and collects results on `tool.v1.execute.*.result`.
 interface tool {
-    use types.{tool-call, tool-call-result, tool-definition};
+    use astrid-bus:types/types.{tool-call, tool-call-result, tool-definition};
 
     /// Request to cancel in-flight tool executions.
     record cancel-request {
@@ -714,6 +729,7 @@ interface tool {
 }
 
 // ── user ──────────────────────────────────────────────────────────
+package astrid-bus:user@1.0.0;
 
 /// User interface — input envelopes from a human via an uplink.
 ///
@@ -734,6 +750,7 @@ interface user {
 }
 
 // ── users ──────────────────────────────────────────────────────────
+package astrid-bus:users@1.0.0;
 
 /// Users interface — within-principal user identity store.
 ///
