@@ -48,16 +48,6 @@ pub struct Output {
     pub exit: ExitInfo,
 }
 
-impl Output {
-    /// Backward-compat accessor — the integer exit code if the process
-    /// exited normally, or `-1` if killed by signal. New code should
-    /// branch on [`ExitInfo`] directly.
-    #[must_use]
-    pub fn exit_code(&self) -> i32 {
-        self.exit.exit_code.unwrap_or(-1)
-    }
-}
-
 /// Buffered logs and status from a background process. Returned by
 /// [`Process::read_logs`].
 #[derive(Debug, Clone)]

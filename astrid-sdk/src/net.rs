@@ -358,18 +358,6 @@ impl TcpStream {
     pub fn reuseaddr(&self) -> Result<bool, SysError> {
         self.inner.reuseaddr().map_err(host_err)
     }
-
-    // ---- Deprecated TTL aliases (pre-migration API) ----
-
-    /// Backward-compat alias for [`set_hop_limit`].
-    pub fn set_ttl(&self, ttl: u32) -> Result<(), SysError> {
-        self.set_hop_limit(ttl)
-    }
-
-    /// Backward-compat alias for [`hop_limit`].
-    pub fn ttl(&self) -> Result<u32, SysError> {
-        self.hop_limit()
-    }
 }
 
 impl std::io::Read for TcpStream {
