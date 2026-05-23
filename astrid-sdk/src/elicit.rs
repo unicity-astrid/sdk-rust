@@ -76,11 +76,7 @@ pub fn text(key: &str, description: &str) -> Result<String, SysError> {
 }
 
 /// Prompt with a default value pre-filled.
-pub fn text_with_default(
-    key: &str,
-    description: &str,
-    default: &str,
-) -> Result<String, SysError> {
+pub fn text_with_default(key: &str, description: &str, default: &str) -> Result<String, SysError> {
     elicit_text(key, description, Some(default))
 }
 

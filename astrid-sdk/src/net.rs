@@ -176,9 +176,8 @@ impl TcpStream {
     /// must allowlist `host:port` via `net_connect`.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
         let (host, port) = parse_host_port(addr)?;
-        let inner = wit_net::connect_tcp(host, port).map_err(|e| {
-            std::io::Error::other(format!("{e:?}"))
-        })?;
+        let inner = wit_net::connect_tcp(host, port)
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         Ok(Self { inner })
     }
 
@@ -186,7 +185,10 @@ impl TcpStream {
 
     /// Read the next length-prefixed frame.
     pub fn read(&self) -> Result<ReadStatus, SysError> {
-        self.inner.read().map(ReadStatus::from_wit).map_err(host_err)
+        self.inner
+            .read()
+            .map(ReadStatus::from_wit)
+            .map_err(host_err)
     }
 
     /// Write a length-prefixed frame.
@@ -280,10 +282,7 @@ impl TcpStream {
 
     /// Set the read timeout. `None` clears it; zero-duration is
     /// rejected (matches `std::net::TcpStream::set_read_timeout`).
-    pub fn set_read_timeout(
-        &self,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<(), SysError> {
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<(), SysError> {
         let ms = to_host_timeout(timeout)?;
         self.inner.set_read_timeout(ms).map_err(host_err)
     }
@@ -298,10 +297,7 @@ impl TcpStream {
     }
 
     /// Set the write timeout. `None` clears it; zero-duration is rejected.
-    pub fn set_write_timeout(
-        &self,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<(), SysError> {
+    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> Result<(), SysError> {
         let ms = to_host_timeout(timeout)?;
         self.inner.set_write_timeout(ms).map_err(host_err)
     }
@@ -472,10 +468,7 @@ impl UdpSocket {
     }
 
     /// Set the read timeout for `recv_from` / `recv`. `None` clears.
-    pub fn set_read_timeout(
-        &self,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<(), SysError> {
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<(), SysError> {
         let ms = to_host_timeout(timeout)?;
         self.inner.set_read_timeout(ms).map_err(host_err)
     }

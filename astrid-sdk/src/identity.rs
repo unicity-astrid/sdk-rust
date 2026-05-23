@@ -43,10 +43,7 @@ pub struct Link {
 /// Returns `Ok(Some(user))` if the platform identity is linked,
 /// `Ok(None)` if no link exists. Requires `identity = ["resolve"]` or
 /// higher.
-pub fn resolve(
-    platform: &str,
-    platform_user_id: &str,
-) -> Result<Option<ResolvedUser>, SysError> {
+pub fn resolve(platform: &str, platform_user_id: &str) -> Result<Option<ResolvedUser>, SysError> {
     let request = wit_identity::IdentityResolveRequest {
         platform: platform.to_string(),
         platform_user_id: platform_user_id.to_string(),

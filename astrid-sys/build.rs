@@ -19,6 +19,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // Tell rustc the `getrandom_backend="custom"` cfg flag is known —
+    // capsule builds set it via `.cargo/config.toml` rustflags. The
+    // check-cfg declaration suppresses the `unexpected_cfgs` lint when
+    // the flag isn't set (host-tooling builds, wasip2 builds).
+    println!("cargo::rustc-check-cfg=cfg(getrandom_backend, values(\"custom\"))");
+
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let contracts_root = crate_root
         .parent() // sdk-rust/
@@ -36,8 +42,11 @@ fn main() {
     // Placeholder root package so wit-bindgen has a starting point.
     // The real synthetic `capsule` world is supplied inline from
     // `src/lib.rs`.
-    fs::write(staging.join("root.wit"), "package astrid-root:placeholder;\n")
-        .expect("write root.wit");
+    fs::write(
+        staging.join("root.wit"),
+        "package astrid-root:placeholder;\n",
+    )
+    .expect("write root.wit");
 
     let host_src = contracts_root.join("host");
     for entry in fs::read_dir(&host_src).expect("read contracts/host") {
@@ -65,11 +74,7 @@ fn main() {
     // checked out should still invalidate the staging dir.
     println!(
         "cargo:rerun-if-changed={}",
-        crate_root
-            .parent()
-            .unwrap()
-            .join(".gitmodules")
-            .display()
+        crate_root.parent().unwrap().join(".gitmodules").display()
     );
 }
 

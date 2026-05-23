@@ -66,20 +66,18 @@ use thiserror::Error;
 pub mod types {
     use serde::{Deserialize, Serialize};
 
-    // Sub-modules (re-exported for `astrid_sdk::types::ipc::*` access)
+    // Sub-modules (re-exported for `astrid_sdk::types::ipc::*` access).
+    //
+    // `kernel`/`kernel_api` is intentionally NOT re-exported here —
+    // those CLI ↔ daemon RPC types now live in `astrid_core::kernel_api`
+    // (post-PR#752 decoupling) and don't belong in capsule space.
+    // Capsules use `ipc` and `llm` types only.
     pub use astrid_types::ipc;
-    pub use astrid_types::kernel;
     pub use astrid_types::llm;
 
     // IPC types
     pub use astrid_types::ipc::{
         IpcMessage, IpcPayload, OnboardingField, OnboardingFieldType, SelectionOption,
-    };
-
-    // Kernel API types
-    pub use astrid_types::kernel::{
-        CapsuleMetadataEntry, CommandInfo, KernelRequest, KernelResponse, LlmProviderInfo,
-        SYSTEM_SESSION_UUID,
     };
 
     // LLM types
@@ -223,7 +221,9 @@ pub mod uplink {
                 "interactive" => Ok(Self::Interactive),
                 "notify" => Ok(Self::Notify),
                 "bridge" => Ok(Self::Bridge),
-                other => Err(SysError::ApiError(format!("unknown uplink profile: {other}"))),
+                other => Err(SysError::ApiError(format!(
+                    "unknown uplink profile: {other}"
+                ))),
             }
         }
     }
@@ -233,8 +233,7 @@ pub mod uplink {
     /// `profile` is one of `"chat"`, `"interactive"`, `"notify"`, `"bridge"`.
     pub fn register(name: &str, platform: &str, profile: &str) -> Result<UplinkId, SysError> {
         let parsed = Profile::parse(profile)?;
-        let id =
-            wit_uplink::uplink_register(name, platform, parsed.to_wit()).map_err(host_err)?;
+        let id = wit_uplink::uplink_register(name, platform, parsed.to_wit()).map_err(host_err)?;
         Ok(UplinkId(id))
     }
 
@@ -244,8 +243,7 @@ pub mod uplink {
         platform: &str,
         profile: Profile,
     ) -> Result<UplinkId, SysError> {
-        let id = wit_uplink::uplink_register(name, platform, profile.to_wit())
-            .map_err(host_err)?;
+        let id = wit_uplink::uplink_register(name, platform, profile.to_wit()).map_err(host_err)?;
         Ok(UplinkId(id))
     }
 

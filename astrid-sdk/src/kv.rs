@@ -81,11 +81,7 @@ pub struct KeyPage {
 /// Pass `None` for `cursor` on the first call, then the value from
 /// [`KeyPage::next_cursor`] on subsequent calls. `limit` is capped at
 /// 1024 per page; 0 means "use the server default."
-pub fn list_keys_page(
-    prefix: &str,
-    cursor: Option<&str>,
-    limit: u32,
-) -> Result<KeyPage, SysError> {
+pub fn list_keys_page(prefix: &str, cursor: Option<&str>, limit: u32) -> Result<KeyPage, SysError> {
     let page = wit_kv::kv_list_keys_page(prefix, cursor, limit).map_err(host_err)?;
     Ok(KeyPage {
         keys: page.keys,

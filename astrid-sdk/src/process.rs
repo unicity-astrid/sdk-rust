@@ -219,7 +219,9 @@ pub fn spawn(cmd: &str, args: &[&str]) -> Result<Output, SysError> {
 /// Returns a [`Process`] whose `Drop` reaps the child. For the full
 /// builder surface use [`Command`].
 pub fn spawn_background(cmd: &str, args: &[&str]) -> Result<Process, SysError> {
-    Command::new(cmd).args(args.iter().copied()).spawn_background()
+    Command::new(cmd)
+        .args(args.iter().copied())
+        .spawn_background()
 }
 
 /// A running (or recently-terminated) background process.
@@ -282,7 +284,10 @@ impl Process {
     /// `wait-timeout` error if the timeout elapses first.
     pub fn wait(&self, timeout: Option<std::time::Duration>) -> Result<ExitInfo, SysError> {
         let ms = timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        self.inner.wait(ms).map(ExitInfo::from_wit).map_err(host_err)
+        self.inner
+            .wait(ms)
+            .map(ExitInfo::from_wit)
+            .map_err(host_err)
     }
 
     /// Wait for the process to exit AND drain remaining stdout / stderr

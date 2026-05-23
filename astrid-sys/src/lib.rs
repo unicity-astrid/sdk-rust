@@ -106,3 +106,56 @@ mod generated {
 }
 
 pub use generated::*;
+
+// ---------------------------------------------------------------------------
+// getrandom custom backend → astrid:sys/host.random-bytes
+// ---------------------------------------------------------------------------
+//
+// Activated when the build is configured with
+// `--cfg=getrandom_backend="custom"` (set in each capsule's
+// `.cargo/config.toml` for the `wasm32-unknown-unknown` target). On other
+// targets the symbol is omitted, so host-tooling builds (build scripts,
+// proc-macros, tests on the developer machine) keep using the platform's
+// default RNG.
+//
+// `wasm32-unknown-unknown` is the Astrid-canonical guest target: it has
+// zero `wasi:*` imports, so every kernel call shows in
+// `astrid.audit.*` and the WIT imports list IS the capsule's literal
+// capability list. The price is that `getrandom` (pulled in
+// transitively via `uuid` / `astrid-types`) has no platform backend on
+// that target — `HashMap` would panic on first insert without this
+// shim.
+//
+// The `#[unsafe(no_mangle)]` symbol below is what `getrandom`'s custom
+// backend expects (see getrandom 0.4 docs). Defining it here in
+// `astrid-sys` keeps the routing centralised: every capsule depending
+// on `astrid-sdk` gets a working RNG with zero per-capsule wiring.
+#[cfg(all(target_arch = "wasm32", getrandom_backend = "custom"))]
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+unsafe extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom::Error> {
+    // Pull bytes from the kernel in chunks bounded by the host fn's
+    // per-call cap. `astrid:sys/host.random-bytes` is audited +
+    // principal-scoped + quota-gated like every other Astrid host fn.
+    const CHUNK: usize = 4096;
+    let mut written = 0usize;
+    while written < len {
+        let want = core::cmp::min(CHUNK, len - written);
+        let chunk = generated::astrid::sys::host::random_bytes(want as u64)
+            .map_err(|_| getrandom::Error::new_custom(1))?;
+        if chunk.is_empty() {
+            return Err(getrandom::Error::new_custom(2));
+        }
+        let take = core::cmp::min(chunk.len(), want);
+        // SAFETY: caller guarantees `dest..dest+len` is a valid byte
+        // buffer (may be uninitialized — write-only access here).
+        unsafe {
+            core::ptr::copy_nonoverlapping(chunk.as_ptr(), dest.add(written), take);
+        }
+        written += take;
+    }
+    Ok(())
+}
