@@ -11,7 +11,7 @@ build = "build.rs"
 include = [
     "src/**/*",
     "build.rs",
-    "../contracts/host/**/*.wit",
+    "wit-staging/**/*.wit",
     "Cargo.toml",
     "LICENSE-*",
     "README.md",
