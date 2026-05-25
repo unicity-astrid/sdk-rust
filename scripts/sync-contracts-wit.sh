@@ -77,9 +77,16 @@ HEADER
     #     — after concat all interfaces live in the same package, so a
     #     cross-package reference becomes a same-package cross-interface
     #     reference. The interface name is the second `/` segment.
+    # Strip per-file `package <ns>:<x>@<ver>;` (one combined header
+    # is emitted by the generator above). Rewrite cross-package
+    # `use <ns>:<pkg>/<iface>.{…};` into same-package `use <iface>.{…};`.
+    # `<ns>` matches the canonical namespaces in use: `astrid` (legacy)
+    # and `astrid-bus` (current). Uses `[a-z-]+` to stay portable
+    # across BSD / GNU sed (alternation `(a|b)` in -E parses
+    # inconsistently between the two).
     sed -E \
-      -e '/^[[:space:]]*package[[:space:]]+astrid:/d' \
-      -e 's|^([[:space:]]*)use[[:space:]]+astrid:[^/]+/([^.]+)\.|\1use \2.|' \
+      -e '/^[[:space:]]*package[[:space:]]+astrid[a-z-]*:/d' \
+      -e 's|^([[:space:]]*)use[[:space:]]+astrid[a-z-]*:[^/]+/([^.]+)\.|\1use \2.|' \
       "$src"
     echo
   done

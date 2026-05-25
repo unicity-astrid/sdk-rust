@@ -7,11 +7,28 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Component Model bindings (Airlocks) for the Astrid OS runtime"
-include = ["src/**/*", "wit/**/*", "Cargo.toml", "LICENSE-*", "README.md"]
+build = "build.rs"
+include = [
+    "src/**/*",
+    "build.rs",
+    "../contracts/host/**/*.wit",
+    "Cargo.toml",
+    "LICENSE-*",
+    "README.md",
+]
 
 [dependencies]
 wit-bindgen = { version = "0.54", default-features = false, features = ["macros"] }
 serde = { version = "1.0", features = ["derive"] }
+# Pulled in transitively by `astrid-types`/`uuid`. We register a custom
+# backend that routes to `astrid:sys/host.random-bytes` so capsules
+# building for `wasm32-unknown-unknown` (the Astrid-canonical target —
+# zero `wasi:*` imports) get a working RNG without ever touching the
+# wasi:random surface. The `custom` feature is the opt-in mechanism;
+# the actual backend selection is gated on
+# `--cfg=getrandom_backend="custom"`, which capsule `.cargo/config.toml`
+# sets in the `[target.wasm32-unknown-unknown]` rustflags block.
+getrandom = { version = "0.4", default-features = false }
 
 [lints]
 workspace = true

@@ -5,12 +5,12 @@ members = [
     "astrid-sdk-macros",
     "astrid-sys",
 ]
-# Test capsule targets wasm32-wasip2 — excluded from host-target workspace.
-# Build with: cd examples/test-capsule && cargo build --target wasm32-wasip2
+# Test capsule targets wasm32-unknown-unknown — excluded from host-target workspace.
+# Build with: cd examples/test-capsule && cargo build --target wasm32-unknown-unknown
 exclude = ["examples/test-capsule"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 authors = ["Joshua J. Bouw <dev@joshuajbouw.com>", "Unicity Labs <info@unicity-labs.com>"]
 license = "MIT OR Apache-2.0"
@@ -18,14 +18,20 @@ repository = "https://github.com/unicity-astrid/sdk-rust"
 rust-version = "1.94"
 
 [workspace.dependencies]
-astrid-sdk = { path = "astrid-sdk", version = "0.6.1" }
-astrid-sdk-macros = { path = "astrid-sdk-macros", version = "0.6.1" }
-astrid-sys = { path = "astrid-sys", version = "0.6.1" }
-astrid-types = { version = "0.4.0" }
+astrid-sdk = { path = "astrid-sdk", version = "0.7.0" }
+astrid-sdk-macros = { path = "astrid-sdk-macros", version = "0.7.0" }
+astrid-sys = { path = "astrid-sys", version = "0.7.0" }
+astrid-types = { version = "0.7" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 wit-parser = "0.227"
+# `default-features = false` strips `clock`, which would otherwise drag
+# `wasm-bindgen` + `js-sys` into the build on `wasm32-unknown-unknown`
+# and produce `__wbindgen_placeholder__` imports that `wit-component`
+# refuses to emit. Records keep `DateTime<Utc>` shapes via the `serde`
+# feature; capsule code reads wall-clock time via `astrid_sdk::time`.
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
