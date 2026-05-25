@@ -96,13 +96,24 @@ pub fn clear_prefix(prefix: &str) -> Result<u64, SysError> {
 
 /// Atomic compare-and-swap.
 ///
-/// If the key's current value equals `expected`, replace it with `new`
-/// and return `true`. Otherwise leave the store unchanged and return
-/// `false` (caller retries with the new current value). `expected` of
-/// `None` means "swap only if the key does not currently exist"
+/// Returns `Ok(true)` if the key's current value equals `expected` and
+/// the swap was applied. Returns `Ok(false)` if `expected` did not
+/// match — the routine lost-race retry path. `expected` of `None`
+/// means "swap only if the key does not currently exist"
 /// (create-if-absent).
+///
+/// SDK-level convenience: the underlying WIT host fn surfaces mismatch
+/// as `Err(ErrorCode::CasMismatch)`. We translate it back to
+/// `Ok(false)` here because capsule code typically wants to branch
+/// on success/mismatch with a boolean, not pattern-match the error
+/// variant. Genuine host errors (quota, invalid key, etc.) still
+/// surface as `Err(SysError::HostError(_))`.
 pub fn cas(key: &str, expected: Option<&[u8]>, new: &[u8]) -> Result<bool, SysError> {
-    wit_kv::kv_cas(key, expected, new).map_err(host_err)
+    match wit_kv::kv_cas(key, expected, new) {
+        Ok(()) => Ok(true),
+        Err(wit_kv::ErrorCode::CasMismatch) => Ok(false),
+        Err(e) => Err(host_err(e)),
+    }
 }
 
 pub fn get_borsh<T: BorshDeserialize>(key: &str) -> Result<T, SysError> {
