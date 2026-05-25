@@ -65,7 +65,18 @@ fn main() {
         })
         .unwrap_or(false);
     if !has_wit_files {
+        // Watch the same surface we'd watch in the staging path. Without
+        // these, Cargo won't rerun build.rs after a developer runs
+        // `git submodule update --init` against a fresh clone, so the
+        // committed wit-staging would stay stale relative to the now-
+        // checked-out submodule.
         println!("cargo:rerun-if-changed=wit-staging");
+        println!("cargo:rerun-if-changed={}", host_src.display());
+        println!("cargo:rerun-if-changed=build.rs");
+        println!(
+            "cargo:rerun-if-changed={}",
+            crate_root.parent().unwrap().join(".gitmodules").display()
+        );
         return;
     }
 
