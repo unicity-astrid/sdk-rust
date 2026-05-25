@@ -14,9 +14,20 @@
 //!
 //! No external WIT packages are vendored — the contract is fully
 //! Astrid-owned (`astrid:*` only, no `wasi:*` dependency).
+//!
+//! Two execution modes:
+//!
+//! - **Workspace builds**: the `contracts/` submodule is present at
+//!   `sdk-rust/contracts/host/`. Clean and re-stage `wit-staging/` from
+//!   the submodule so the committed copy stays in lockstep with the
+//!   canonical source.
+//! - **Published builds** (`cargo install`, `cargo publish` verifier):
+//!   the submodule isn't part of the `.crate` tarball. Skip staging —
+//!   the committed `wit-staging/` ships with the crate and is what
+//!   `wit_bindgen::generate!` consumes.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn main() {
     // Tell rustc the `getrandom_backend="custom"` cfg flag is known —
@@ -26,13 +37,37 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(getrandom_backend, values(\"custom\"))");
 
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let contracts_root = crate_root
+    let host_src = crate_root
         .parent() // sdk-rust/
         .expect("astrid-sys must live under the sdk-rust workspace root")
-        .join("contracts");
+        .join("contracts")
+        .join("host");
 
     let staging = crate_root.join("wit-staging");
     let deps = staging.join("deps");
+
+    // Published-crate path: the `unicity-astrid/wit` submodule isn't
+    // available on a consumer's machine. The committed `wit-staging/`
+    // ships with the crate; `src/lib.rs`'s `wit_bindgen::generate!`
+    // reads it directly. Skip the stage step.
+    //
+    // Empty-submodule path: a fresh clone without `git submodule
+    // update --init` leaves `host_src/` non-existent or empty. Treat
+    // identically to the published-crate path so we don't wipe the
+    // committed wit-staging.
+    let has_wit_files = fs::read_dir(&host_src)
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
+            })
+        })
+        .unwrap_or(false);
+    if !has_wit_files {
+        println!("cargo:rerun-if-changed=wit-staging");
+        return;
+    }
 
     if staging.exists() {
         fs::remove_dir_all(&staging).expect("clean wit-staging");
@@ -48,7 +83,6 @@ fn main() {
     )
     .expect("write root.wit");
 
-    let host_src = contracts_root.join("host");
     for entry in fs::read_dir(&host_src).expect("read contracts/host") {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -70,7 +104,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    rerun_if_dir_changed(&host_src);
+    println!("cargo:rerun-if-changed={}", host_src.display());
     println!("cargo:rerun-if-changed=build.rs");
     // CI environments may run `git submodule update` lazily; the
     // .gitmodules pointer changing without the working tree yet
@@ -79,8 +113,4 @@ fn main() {
         "cargo:rerun-if-changed={}",
         crate_root.parent().unwrap().join(".gitmodules").display()
     );
-}
-
-fn rerun_if_dir_changed(dir: &Path) {
-    println!("cargo:rerun-if-changed={}", dir.display());
 }
