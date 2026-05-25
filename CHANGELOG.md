@@ -9,6 +9,8 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-26
+
 ### Breaking
 
 - **Per-domain WIT host ABI.** The single `astrid:capsule@0.1.0` world has been split into per-domain frozen packages at `@1.0.0` (`astrid:fs`, `astrid:ipc`, `astrid:kv`, `astrid:net`, `astrid:http`, `astrid:sys`, `astrid:process`, `astrid:uplink`, `astrid:elicit`, `astrid:approval`, `astrid:identity`) plus Astrid-owned foundation I/O (`astrid:io/{error, poll, streams}`). Capsule authors must recompile against this SDK; the contract surface is wire-level incompatible with pre-0.7 capsules. Guest exports moved to per-export worlds in `astrid:guest@1.0.0` (`interceptor`, `background`, `installable`, `upgradable`).
