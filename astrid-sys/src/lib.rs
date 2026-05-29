@@ -138,8 +138,10 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
     len: usize,
 ) -> Result<(), getrandom::Error> {
     // Pull bytes from the kernel in chunks bounded by the host fn's
-    // per-call cap. `astrid:sys/host.random-bytes` is audited +
-    // principal-scoped + quota-gated like every other Astrid host fn.
+    // per-call cap. `astrid:sys/host.random-bytes` is served straight
+    // from the host's OS CSPRNG; per the `astrid:sys` WIT contract it is
+    // intentionally ungated and not audited (read-only, no side effects),
+    // unlike the gated/audited host calls such as fs / net / process.
     const CHUNK: usize = 4096;
     let mut written = 0usize;
     while written < len {
