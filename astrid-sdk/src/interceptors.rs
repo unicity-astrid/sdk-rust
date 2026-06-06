@@ -36,8 +36,8 @@ impl InterceptorBinding {
 /// Query the runtime for auto-subscribed interceptor handles.
 ///
 /// Returns an empty vec if this capsule has no auto-subscribed
-/// interceptors (i.e. it does not have both `run()` and
-/// `[[interceptor]]`). Each entry maps an action name to the IPC
+/// interceptors (i.e. it does not have both `run()` and a `[subscribe]`
+/// entry with a `handler`). Each entry maps an action name to the IPC
 /// topic the kernel routes through `astrid-hook-trigger`.
 pub fn bindings() -> Result<Vec<InterceptorBinding>, SysError> {
     let handles = wit_ipc::get_interceptor_bindings().map_err(host_err)?;

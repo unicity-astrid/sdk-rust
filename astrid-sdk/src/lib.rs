@@ -502,8 +502,8 @@ pub mod elicit;
 
 /// Auto-subscribed interceptor bindings for run-loop capsules.
 ///
-/// When a capsule declares both `run()` and `[[interceptor]]`, the runtime
-/// auto-subscribes to each interceptor's topic and delivers events through
+/// When a capsule declares both `run()` and a `[subscribe]` entry with a
+/// `handler`, the runtime auto-subscribes to each interceptor's topic and delivers events through
 /// the IPC channel the run loop already reads from. This module provides
 /// helpers to query the subscription mappings and dispatch events by action.
 pub mod interceptors;
