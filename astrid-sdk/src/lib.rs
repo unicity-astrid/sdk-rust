@@ -467,11 +467,14 @@ pub mod runtime {
     }
 }
 
-/// Cross-capsule capability queries.
+/// Capability introspection.
 ///
-/// Allows a capsule to check whether another capsule (identified by its
-/// IPC session UUID) has a specific manifest capability. Used by the
-/// prompt builder to enforce `allow_prompt_injection` gating.
+/// [`check`] asks whether a capsule (self or any other, by IPC session UUID)
+/// holds a specific manifest capability — used by the prompt builder to
+/// enforce `allow_prompt_injection` gating. [`enumerate`] is the list dual for
+/// the calling capsule's own set: the names for which a self-`check` returns
+/// `true`. Capability posture is structural metadata, not a secret
+/// (enforce-don't-conceal), so both are ungated.
 pub mod capabilities {
     use super::*;
 
@@ -487,6 +490,23 @@ pub mod capabilities {
         };
         let response = wit_sys::check_capsule_capability(&request).map_err(host_err)?;
         Ok(response.allowed)
+    }
+
+    /// Enumerate the calling capsule's own held capability names.
+    ///
+    /// Returns the capability categories declared in this capsule's
+    /// `[capabilities]` manifest block (`host_process`, `net_connect`,
+    /// `fs_read`, …) — the names, not the scoped arguments within them
+    /// (allowlists, `host:port`, paths). This is exactly the set of names for
+    /// which [`check`] against this capsule's own UUID returns `true`.
+    ///
+    /// Argument-free (the kernel already knows the caller) and infallible: the
+    /// kernel always knows the caller's own registered set, so there is no
+    /// error path — an empty list is the valid "no capabilities" answer. Lets
+    /// a reusable capsule ground its behaviour in what it can actually do
+    /// instead of hard-coding it, avoiding code-vs-manifest drift.
+    pub fn enumerate() -> Vec<String> {
+        wit_sys::enumerate_capabilities()
     }
 }
 
