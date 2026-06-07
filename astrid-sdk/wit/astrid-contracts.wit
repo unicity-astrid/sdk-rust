@@ -296,6 +296,27 @@ interface hook {
         /// Merged data from interceptor responses (opaque JSON).
         data: option<string>,
     }
+
+    /// Payload of `hook.v1.event.<hook_name>` envelopes published by the
+    /// hook bridge during fan-out to subscriber capsules.
+    ///
+    /// Subscribers wishing to influence the outcome (merge strategies
+    /// `ToolCallBefore` / `LastNonNull`) reply on the per-request
+    /// scoped topic `hook.v1.response.<hook_name>.<correlation-id>`.
+    /// When `correlation-id` is absent, the dispatch is fire-and-forget
+    /// (merge semantics `None`) and no reply topic exists.
+    record hook-event-request {
+        /// Semantic hook name (e.g. `before_tool_call`, `session_start`,
+        /// `on_compaction_started`). Matches the mapping table in
+        /// `astrid-capsule-hook-bridge`.
+        hook: string,
+        /// Original lifecycle event payload, serialized as JSON. Opaque
+        /// to the bus — subscribers parse based on the hook name.
+        payload: string,
+        /// Per-request correlation id for scoped replies. `none` for
+        /// fire-and-forget hooks.
+        correlation-id: option<string>,
+    }
 }
 
 // ── llm ──────────────────────────────────────────────────────────
