@@ -295,6 +295,12 @@ impl Command {
     ///
     /// Gated on `host_process`. Counts against the per-principal concurrent
     /// cap (shared with `spawn_background`) and the retained-id cap.
+    ///
+    /// Beyond the `host_process` check, this can also fail when the
+    /// invocation has no authenticated principal in scope (the owner-fallback
+    /// case): a persistent id must be scoped to a real principal, so an
+    /// unauthenticated path is refused with a host error rather than sharing a
+    /// `default` namespace that `list`/`status_many` would enumerate.
     pub fn spawn_persistent(self) -> Result<PersistentProcess, SysError> {
         let req = self.into_wit();
         let id = wit_process::spawn_persistent(&req).map_err(host_err)?;
@@ -419,9 +425,12 @@ impl Process {
 // ============================================================
 
 /// Opaque, principal-scoped identity for a persistent process that survives
-/// instance churn. Persist it (e.g. in KV) to reattach later. Treat as an
-/// opaque secret — never parse or synthesize it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// instance churn. Persist it (e.g. in KV) to reattach later — `Serialize` /
+/// `Deserialize` let it ride in a state struct alongside a [`LogCursor`].
+/// Treat as opaque — never parse or synthesize it. (A leaked id is inert
+/// across the principal/capsule boundary: the host re-checks ownership on
+/// every id-keyed call, so it is a handle, not a credential.)
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessId(String);
 
 impl ProcessId {
@@ -539,8 +548,10 @@ impl ResourceLimits {
 
 /// Opaque, resumable cursor into a persistent process's log stream. Use
 /// [`LogCursor::start`] for the first read; pass [`LogChunk::next`] back to
-/// resume exactly where you left off. Treat as opaque.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// resume exactly where you left off. Treat as opaque. `Serialize` /
+/// `Deserialize` let a capsule persist the cursor (e.g. in KV) and resume
+/// `read_since` from the same position in a later invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LogCursor {
     token: Option<String>,
 }
