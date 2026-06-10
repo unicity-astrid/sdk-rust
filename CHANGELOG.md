@@ -14,9 +14,13 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 This release restores capsule tool discovery and ships the first two post-0.7 additions to the
 host surface. The headline is the `tool_describe` macro fix: every tool capsule built on 0.7.0
 answered the kernel's describe fan-out with nothing, so every collector — prompt-builder, the
-registry, the `astrid mcp serve` MCP bridge — saw zero tools. Rebuilding a capsule against 0.7.1
-is the entire fix; `astrid-sdk = "0.7"` consumers resolve it automatically with no `Cargo.toml`
-change. Riding along, two additive surfaces: the `astrid:process` persistent-process tier
+registry, the `astrid mcp serve` MCP bridge — saw zero tools. Rebuilding a tool capsule against
+0.7.1 fixes the producer side — `astrid-sdk = "0.7"` consumers resolve it automatically with no
+`Cargo.toml` change — but it is necessary, not sufficient: the consumer side (`prompt-builder`)
+must also grant the describe-fan-out ACLs its `collect_tool_schemas()` already uses and invalidate
+its KV-cached tool schemas, or the fan-out is `CapabilityDenied` / serves a stale list and a
+0.7.1-only rebuild still surfaces zero tools to the LLM (`unicity-astrid/astrid#892`, `#625`).
+Riding along, two additive surfaces: the `astrid:process` persistent-process tier
 (background children that outlive the pooled capsule instance, reattachable by id from a later
 invocation) and `capabilities::enumerate` (a capsule can ground its behaviour in the capabilities
 it actually holds instead of hard-coding assumptions). No breaking changes.
