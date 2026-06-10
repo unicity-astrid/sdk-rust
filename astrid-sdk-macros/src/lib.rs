@@ -640,6 +640,27 @@ fn capsule_impl(
                     "description": capsule_desc.unwrap_or(""),
                 });
 
+                // Publish the descriptor on the describe-response topic. The
+                // `tool.v1.request.describe` fan-out (prompt-builder, registry,
+                // the sage-mcp MCP bridge) COLLECTS by subscribing to
+                // `tool.v1.response.describe.*` — under the current ABI an
+                // interceptor's return value is NOT fanned out to the caller, so
+                // the descriptor must be published explicitly (mirroring the
+                // hand-written LLM providers that publish `llm.v1.response.describe`).
+                // The route layer's trailing `*` needs >= 5 segments; the
+                // responder's real source_id rides in the kernel-stamped message
+                // metadata, so the fixed `self` suffix exists only to satisfy that
+                // routing arity. Best-effort: a failed publish only omits this
+                // capsule's tools from the fan-out (logged, never a hard error).
+                if let Err(e) = ::astrid_sdk::prelude::ipc::publish_json(
+                    "tool.v1.response.describe.self",
+                    &response,
+                ) {
+                    ::astrid_sdk::prelude::log::warn(format!(
+                        "tool_describe: failed to publish descriptor, tools absent from describe fan-out: {e:?}"
+                    ));
+                }
+
                 let data = match ::serde_json::to_string(&response) {
                     Ok(s) => s,
                     Err(e) => {
@@ -941,6 +962,54 @@ mod tests {
         assert!(
             output.contains("json ! (true)"),
             "Inline mutable should produce json!(true), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn tool_describe_publishes_response_for_fanout() {
+        // Regression guard: the generated `tool_describe` arm MUST publish its
+        // descriptor on `tool.v1.response.describe.*`. Under the current ABI an
+        // interceptor's return value is NOT fanned out to the caller, so a
+        // return-only describe silently fails the `tool.v1.request.describe`
+        // fan-out and prompt-builder / registry / the sage-mcp MCP bridge
+        // collect 0 tools. Guard against regressing to return-only.
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::tool("read_file")]
+                fn read_file(&self, args: ReadArgs) -> Result<ReadResult, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("publish_json"),
+            "tool_describe must call ipc::publish_json for the describe fan-out, got:\n{output}"
+        );
+        assert!(
+            output.contains("tool.v1.response.describe.self"),
+            "tool_describe must publish on tool.v1.response.describe.* for the fan-out, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn capsule_without_tools_has_no_describe_publish() {
+        // A capsule with no #[tool] methods generates no tool_describe arm, so it
+        // must not emit a stray describe-response publish.
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::interceptor("on_event")]
+                fn on_event(&self, payload: serde_json::Value) -> Result<(), Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            !output.contains("tool.v1.response.describe"),
+            "capsule without tools should not publish a describe response, got:\n{output}"
         );
     }
 
