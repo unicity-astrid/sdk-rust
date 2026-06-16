@@ -59,6 +59,27 @@ impl TestCapsule {
         Ok(serde_json::json!({ "handled": true }))
     }
 
+    /// A lifecycle hook that inspects a tool-call event and may veto it.
+    ///
+    /// Exercises the `#[hook]` arm end-to-end: deserialize the payload,
+    /// inspect it, and reply with a [`hook::HookResult`] (here: skip the
+    /// call when the tool name is `forbidden`, otherwise pass through).
+    #[astrid::hook("before_tool_call")]
+    fn before_tool_call(
+        &self,
+        event: &hook::HookEvent,
+    ) -> Result<Option<hook::HookResult>, SysError> {
+        log::info(&format!("hook {} fired", event.name()));
+        let payload: serde_json::Value = event.payload()?;
+        if payload.get("tool").and_then(|t| t.as_str()) == Some("forbidden") {
+            return Ok(Some(hook::HookResult {
+                skip: Some(true),
+                data: None,
+            }));
+        }
+        Ok(None)
+    }
+
     /// Lifecycle: first-time install.
     #[astrid::install]
     fn install(&self) -> Result<(), SysError> {

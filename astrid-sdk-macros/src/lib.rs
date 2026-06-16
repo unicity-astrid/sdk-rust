@@ -605,6 +605,104 @@ fn capsule_impl(
                             }
                         });
                     }
+                } else if attr_name == "hook" {
+                    // #[hook("name")] subscribes to a semantic lifecycle hook.
+                    // The method signature is
+                    //   fn(&self, event: &HookEvent)
+                    //       -> Result<Option<HookResult>, SysError>
+                    // The bridge delivers a JSON-encoded HookEventRequest as
+                    // `payload`. We deserialize it, hand the typed HookEvent to
+                    // the user method, then publish any returned HookResult on
+                    // the scoped reply topic. Every path is fail-open: a bad
+                    // event or handler error must not wedge the capsule, so we
+                    // always return `continue`.
+                    //
+                    // The call expression mirrors the interceptor arm's
+                    // stateful (load-from-KV `instance`, persist after) vs
+                    // stateless (`get_instance()`) instance handling so #[hook]
+                    // works for both kinds of capsule.
+                    let hook_call = if is_stateful {
+                        quote! { instance.#method_name(&event) }
+                    } else {
+                        quote! { get_instance().#method_name(&event) }
+                    };
+
+                    let dispatch = quote! {
+                        match #hook_call {
+                            Ok(Some(result)) => {
+                                if let Err(e) = event.reply(result) {
+                                    ::astrid_sdk::prelude::log::warn(
+                                        format!("hook '{}': failed to reply: {}", #name_val, e),
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                ::astrid_sdk::prelude::log::warn(
+                                    format!("hook '{}': handler error: {}", #name_val, e),
+                                );
+                            }
+                        }
+                    };
+
+                    // Wrap the dispatch in the same state lifecycle the
+                    // interceptor path uses: load `instance` from KV before the
+                    // call, persist it back after, for stateful capsules.
+                    let hook_block = if is_stateful {
+                        quote! {
+                            let mut instance: #struct_name = match ::astrid_sdk::prelude::kv::get_json("__state") {
+                                Ok(state) => state,
+                                Err(::astrid_sdk::SysError::JsonError(_)) => Default::default(),
+                                Err(e) => {
+                                    ::astrid_sdk::prelude::log::warn(
+                                        format!("hook '{}': failed to load state: {}", #name_val, e),
+                                    );
+                                    return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                        action: "continue".into(),
+                                        data: None,
+                                    };
+                                }
+                            };
+                            #dispatch
+                            if let Err(e) = ::astrid_sdk::prelude::kv::set_json("__state", &instance) {
+                                ::astrid_sdk::prelude::log::warn(
+                                    format!("hook '{}': failed to save state: {}", #name_val, e),
+                                );
+                            }
+                            return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "continue".into(),
+                                data: None,
+                            };
+                        }
+                    } else {
+                        quote! {
+                            #dispatch
+                            return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                action: "continue".into(),
+                                data: None,
+                            };
+                        }
+                    };
+
+                    hook_arms.push(quote! {
+                        #name_val => {
+                            let req: ::astrid_sdk::hook::HookEventRequest =
+                                match ::serde_json::from_slice(&payload) {
+                                    Ok(req) => req,
+                                    Err(e) => {
+                                        ::astrid_sdk::prelude::log::warn(
+                                            format!("hook '{}': malformed event: {}", #name_val, e),
+                                        );
+                                        return ::astrid_sdk::astrid_sys::CapsuleResult {
+                                            action: "continue".into(),
+                                            data: None,
+                                        };
+                                    }
+                                };
+                            let event = ::astrid_sdk::hook::HookEvent::from_request(req);
+                            #hook_block
+                        }
+                    });
                 } else if attr_name == "command" {
                     command_arms.push(quote! {
                         #name_val => { #execute_block }
@@ -1010,6 +1108,82 @@ mod tests {
         assert!(
             !output.contains("tool.v1.response.describe"),
             "capsule without tools should not publish a describe response, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn hook_arm_generated_stateless() {
+        // A stateless #[hook] method must register a match arm keyed on the
+        // hook name that deserializes a HookEventRequest, dispatches via
+        // get_instance(), and replies — all fail-open ("continue").
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::hook("before_tool_call")]
+                fn before_tool_call(
+                    &self,
+                    event: &astrid_sdk::hook::HookEvent,
+                ) -> Result<Option<astrid_sdk::hook::HookResult>, astrid_sdk::SysError> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("\"before_tool_call\""),
+            "Hook arm must key on the hook name, got:\n{output}"
+        );
+        assert!(
+            output.contains("HookEventRequest") && output.contains("from_request"),
+            "Hook arm must deserialize a HookEventRequest and build a HookEvent, got:\n{output}"
+        );
+        assert!(
+            output.contains("get_instance ()"),
+            "Stateless hook arm must dispatch via get_instance(), got:\n{output}"
+        );
+        assert!(
+            output.contains("event . reply (result)"),
+            "Hook arm must reply with the returned HookResult, got:\n{output}"
+        );
+        assert!(
+            output.contains("\"continue\""),
+            "Hook arm must be fail-open (continue), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn hook_arm_stateful_persists_state() {
+        // A #[hook] method on a stateful capsule (some &mut self method present)
+        // must load state from KV before the call and persist it after, like the
+        // interceptor path.
+        let attr = quote::quote! {};
+        let input = quote::quote! {
+            impl MyCapsule {
+                #[astrid::hook("session_start")]
+                fn session_start(
+                    &self,
+                    event: &astrid_sdk::hook::HookEvent,
+                ) -> Result<Option<astrid_sdk::hook::HookResult>, astrid_sdk::SysError> {
+                    todo!()
+                }
+                #[astrid::tool("bump")]
+                fn bump(&mut self, args: BumpArgs) -> Result<BumpResult, Error> {
+                    todo!()
+                }
+            }
+        };
+        let output = capsule_impl(attr, input).to_string();
+        assert!(
+            output.contains("get_json (\"__state\")"),
+            "Stateful hook arm must load state from KV, got:\n{output}"
+        );
+        assert!(
+            output.contains("set_json (\"__state\""),
+            "Stateful hook arm must persist state to KV, got:\n{output}"
+        );
+        assert!(
+            output.contains("instance . session_start (& event)"),
+            "Stateful hook arm must dispatch on the loaded instance, got:\n{output}"
         );
     }
 
