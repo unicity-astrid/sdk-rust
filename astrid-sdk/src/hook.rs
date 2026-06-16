@@ -119,10 +119,10 @@ impl HookEvent {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::SysError::HostError`] if the payload is not valid
+    /// Returns [`crate::SysError::JsonError`] if the payload is not valid
     /// JSON for `T`.
     pub fn payload<T: ::serde::de::DeserializeOwned>(&self) -> Result<T, crate::SysError> {
-        ::serde_json::from_str(&self.payload).map_err(|e| crate::SysError::HostError(e.to_string()))
+        ::serde_json::from_str(&self.payload).map_err(crate::SysError::from)
     }
 
     /// Publish a [`HookResult`] on this event's scoped reply topic.
@@ -232,14 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn payload_malformed_is_host_error() {
+    fn payload_malformed_is_json_error() {
         let event = HookEvent::from_request(HookEventRequest {
             hook: "before_tool_call".into(),
             payload: "not json".into(),
             correlation_id: None,
         });
         let err = event.payload::<ToolPayload>().unwrap_err();
-        assert!(matches!(err, crate::SysError::HostError(_)));
+        assert!(matches!(err, crate::SysError::JsonError(_)));
     }
 
     // The reply helpers publish over IPC, which requires a host. We assert
