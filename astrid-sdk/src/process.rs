@@ -109,6 +109,31 @@ impl Signal {
     }
 }
 
+/// How an injected read-only file is exposed to the spawned child.
+///
+/// Both modes expose the SAME bytes read-only — the child (and any
+/// subprocess it spawns) cannot modify them, and neither can the spawning
+/// principal's `fs` surface. They differ only in how the child finds the
+/// file, chosen to match the target program's config mechanism. See
+/// [`Command::inject_env_file`] / [`Command::inject_file_at`].
+#[derive(Debug, Clone)]
+pub enum InjectionPlacement {
+    /// The host materializes the bytes at a host-owned path (outside every
+    /// VFS mount) and sets the named environment variable on the child to
+    /// that path. The host owns the path — there is no caller-chosen target.
+    /// Works on **Linux and macOS** (the OS-agnostic mode); use it for
+    /// programs whose enforced config tier is reachable via an env-redirected
+    /// file. The `String` is the env-var name.
+    EnvPointer(String),
+    /// The host ro-binds the bytes at this absolute in-sandbox path (the
+    /// mount point is created, so `path` need not pre-exist). **Linux only**
+    /// — rejected on macOS with `invalid-input`, since Seatbelt has no mount
+    /// namespace and materializing at a caller-named host path would be an
+    /// arbitrary host write. Use it for programs whose enforced tier is a
+    /// fixed path with no env redirect.
+    FixedPath(String),
+}
+
 /// Builder for the [`spawn`] / [`spawn_background`] request body. The
 /// pre-migration helper took just `(cmd, args)`; this builder allows
 /// the new contract's `env`, `cwd`, and `stdin` fields without
@@ -120,6 +145,8 @@ pub struct Command {
     stdin: Option<Vec<u8>>,
     env: Vec<(String, String)>,
     cwd: Option<String>,
+    /// Read-only files injected into the child, honored by all spawn modes.
+    file_injections: Vec<(Vec<u8>, InjectionPlacement)>,
     // Persistent-tier knobs — honored ONLY by [`spawn_persistent`], ignored
     // by [`spawn`] / [`spawn_background`] (per the WIT contract).
     label: Option<String>,
@@ -177,6 +204,49 @@ impl Command {
     #[must_use]
     pub fn cwd(mut self, path: impl Into<String>) -> Self {
         self.cwd = Some(path.into());
+        self
+    }
+
+    /// Inject `content` into the child as a read-only file the child cannot
+    /// modify, exposed via the named environment variable pointing at a
+    /// host-owned path ([`InjectionPlacement::EnvPointer`]). OS-agnostic
+    /// (Linux and macOS). The host owns the bytes' integrity and exposure;
+    /// `content` is opaque to it. Honored by all spawn modes.
+    #[must_use]
+    pub fn inject_env_file(
+        mut self,
+        env_var: impl Into<String>,
+        content: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.file_injections.push((
+            content.into(),
+            InjectionPlacement::EnvPointer(env_var.into()),
+        ));
+        self
+    }
+
+    /// Inject `content` into the child as a read-only file ro-bound at the
+    /// absolute in-sandbox `path` ([`InjectionPlacement::FixedPath`]).
+    /// **Linux only** — rejected on macOS with `invalid-input`. Honored by
+    /// all spawn modes.
+    #[must_use]
+    pub fn inject_file_at(mut self, path: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
+        self.file_injections
+            .push((content.into(), InjectionPlacement::FixedPath(path.into())));
+        self
+    }
+
+    /// Inject `content` with an explicit [`InjectionPlacement`]. Lower-level
+    /// form of [`inject_env_file`](Self::inject_env_file) /
+    /// [`inject_file_at`](Self::inject_file_at) for callers that compute the
+    /// placement dynamically.
+    #[must_use]
+    pub fn inject_file(
+        mut self,
+        content: impl Into<Vec<u8>>,
+        placement: InjectionPlacement,
+    ) -> Self {
+        self.file_injections.push((content.into(), placement));
         self
     }
 
@@ -258,6 +328,21 @@ impl Command {
                 .map(|(key, value)| wit_process::EnvVar { key, value })
                 .collect(),
             cwd: self.cwd,
+            file_injections: self
+                .file_injections
+                .into_iter()
+                .map(|(content, placement)| wit_process::FileInjection {
+                    content,
+                    placement: match placement {
+                        InjectionPlacement::EnvPointer(v) => {
+                            wit_process::InjectionPlacement::EnvPointer(v)
+                        }
+                        InjectionPlacement::FixedPath(p) => {
+                            wit_process::InjectionPlacement::FixedPath(p)
+                        }
+                    },
+                })
+                .collect(),
             limits: self.limits.map(ResourceLimits::into_wit),
             label: self.label,
             keep_stdin_open: self.keep_stdin_open.then_some(true),
@@ -780,4 +865,40 @@ pub fn status_many(ids: &[ProcessId]) -> Result<Vec<ProcessInfo>, SysError> {
     wit_process::status_many(&raw)
         .map(|v| v.into_iter().map(ProcessInfo::from_wit).collect())
         .map_err(host_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_builders_accumulate_in_order() {
+        let cmd = Command::new("agent")
+            .inject_env_file("CLAUDE_CODE_MANAGED_SETTINGS_PATH", b"{}".to_vec())
+            .inject_file_at("/etc/codex/requirements.toml", b"policy".to_vec())
+            .inject_file(
+                b"x".to_vec(),
+                InjectionPlacement::EnvPointer("GEMINI".into()),
+            );
+
+        assert_eq!(cmd.file_injections.len(), 3);
+        assert!(matches!(
+            cmd.file_injections[0].1,
+            InjectionPlacement::EnvPointer(ref v) if v == "CLAUDE_CODE_MANAGED_SETTINGS_PATH"
+        ));
+        assert_eq!(cmd.file_injections[0].0, b"{}");
+        assert!(matches!(
+            cmd.file_injections[1].1,
+            InjectionPlacement::FixedPath(ref p) if p == "/etc/codex/requirements.toml"
+        ));
+        assert!(matches!(
+            cmd.file_injections[2].1,
+            InjectionPlacement::EnvPointer(ref v) if v == "GEMINI"
+        ));
+    }
+
+    #[test]
+    fn no_injection_by_default() {
+        assert!(Command::new("agent").file_injections.is_empty());
+    }
 }
