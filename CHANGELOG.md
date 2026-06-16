@@ -9,6 +9,25 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+### Added
+
+- **Read-only file injection on the spawn builder.** `Command::inject_env_file(env_var, content)`
+  (OS-agnostic: host materializes the bytes at a host-owned path and points the named env var at
+  it), `Command::inject_file_at(path, content)` (Linux-only ro-bind at an absolute in-sandbox path;
+  rejected on macOS), and the lower-level `Command::inject_file(content, placement)` with the public
+  `InjectionPlacement { EnvPointer, FixedPath }`. The injected bytes are exposed read-only and are
+  unmodifiable by the child, its subprocesses, or the spawning principal's `fs` surface. Honored by
+  all spawn modes. (`unicity-astrid/astrid#881`/`#890`)
+
+### Changed
+
+- **Bumped the `contracts` submodule to `0a50cfc`** (canonical wit `main` with #14 un-stubbed
+  persistent stdin and #15 process file-injection). `build.rs` re-stages `wit-staging` from
+  `contracts/host`, so `astrid:process@1.0.0` now carries `spawn-request.file-injections`. This
+  restores WIT/linker lockstep with core: a process-tier capsule built against the SDK previously
+  got an older `process@1.0.0` than the host exposes. The `astrid-contracts.wit` events bundle is
+  unchanged (file-injection is a `host/` contract, not an `interfaces/` one).
+
 ## [0.7.1] - 2026-06-10
 
 This release restores capsule tool discovery and ships the first two post-0.7 additions to the
