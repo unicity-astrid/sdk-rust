@@ -218,8 +218,10 @@ impl Command {
         env_var: impl Into<String>,
         content: impl Into<Vec<u8>>,
     ) -> Self {
-        self.file_injections
-            .push((content.into(), InjectionPlacement::EnvPointer(env_var.into())));
+        self.file_injections.push((
+            content.into(),
+            InjectionPlacement::EnvPointer(env_var.into()),
+        ));
         self
     }
 
@@ -228,11 +230,7 @@ impl Command {
     /// **Linux only** — rejected on macOS with `invalid-input`. Honored by
     /// all spawn modes.
     #[must_use]
-    pub fn inject_file_at(
-        mut self,
-        path: impl Into<String>,
-        content: impl Into<Vec<u8>>,
-    ) -> Self {
+    pub fn inject_file_at(mut self, path: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
         self.file_injections
             .push((content.into(), InjectionPlacement::FixedPath(path.into())));
         self
@@ -243,7 +241,11 @@ impl Command {
     /// [`inject_file_at`](Self::inject_file_at) for callers that compute the
     /// placement dynamically.
     #[must_use]
-    pub fn inject_file(mut self, content: impl Into<Vec<u8>>, placement: InjectionPlacement) -> Self {
+    pub fn inject_file(
+        mut self,
+        content: impl Into<Vec<u8>>,
+        placement: InjectionPlacement,
+    ) -> Self {
         self.file_injections.push((content.into(), placement));
         self
     }
@@ -334,10 +336,10 @@ impl Command {
                     placement: match placement {
                         InjectionPlacement::EnvPointer(v) => {
                             wit_process::InjectionPlacement::EnvPointer(v)
-                        },
+                        }
                         InjectionPlacement::FixedPath(p) => {
                             wit_process::InjectionPlacement::FixedPath(p)
-                        },
+                        }
                     },
                 })
                 .collect(),
@@ -874,7 +876,10 @@ mod tests {
         let cmd = Command::new("agent")
             .inject_env_file("CLAUDE_CODE_MANAGED_SETTINGS_PATH", b"{}".to_vec())
             .inject_file_at("/etc/codex/requirements.toml", b"policy".to_vec())
-            .inject_file(b"x".to_vec(), InjectionPlacement::EnvPointer("GEMINI".into()));
+            .inject_file(
+                b"x".to_vec(),
+                InjectionPlacement::EnvPointer("GEMINI".into()),
+            );
 
         assert_eq!(cmd.file_injections.len(), 3);
         assert!(matches!(
