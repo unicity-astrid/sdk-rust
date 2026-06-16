@@ -513,6 +513,20 @@ pub mod capabilities {
 pub mod net;
 pub mod process;
 
+/// Lifecycle hook handling — read kernel lifecycle events, optionally reply.
+///
+/// The hook bridge fans semantic hooks (tool calls, session lifecycle,
+/// compaction, …) out to subscriber capsules as [`hook::HookEvent`]s. A
+/// subscriber inspects the event and may reply with a [`hook::HookResult`]
+/// to skip the gated operation or merge data back into it. The
+/// `#[hook("name")]` attribute on a `#[capsule]` method wires this up.
+///
+/// Re-exports the canonical [`HookEventRequest`](hook::HookEventRequest) and
+/// [`HookResult`](hook::HookResult) from [`contracts`], so it is only
+/// available with the `derive` feature (enabled by default).
+#[cfg(feature = "derive")]
+pub mod hook;
+
 /// The Elicit Airlock - User Input During Install/Upgrade Lifecycle
 ///
 /// These functions are only callable during `#[astrid::install]` and
@@ -651,6 +665,11 @@ pub mod prelude {
         time,
         uplink,
     };
+
+    // Hook handling re-exports the `derive`-gated `contracts` types, so the
+    // module is only available with the `derive` feature.
+    #[cfg(feature = "derive")]
+    pub use crate::hook;
 
     #[cfg(feature = "derive")]
     pub use astrid_sdk_macros::capsule;
