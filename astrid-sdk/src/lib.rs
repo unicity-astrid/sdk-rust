@@ -47,7 +47,11 @@
 use astrid_sys::astrid::approval::host as wit_approval;
 use astrid_sys::astrid::elicit::host as wit_elicit;
 use astrid_sys::astrid::fs::host as wit_fs;
-use astrid_sys::astrid::http::host as wit_http;
+// `http` moved to @1.1.0. With both `http@1.0.0` and `http@1.1.0`
+// staged side by side, wit-bindgen disambiguates the generated module
+// by version (`http1_1_0`). The alias absorbs that name so the http
+// wrappers keep referring to `wit_http`.
+use astrid_sys::astrid::http1_1_0::host as wit_http;
 use astrid_sys::astrid::identity::host as wit_identity;
 use astrid_sys::astrid::ipc::host as wit_ipc;
 use astrid_sys::astrid::kv::host as wit_kv;

@@ -7,7 +7,9 @@
 //!
 //! wit-bindgen expects a single root directory with one package per
 //! `deps/<name>/` subdir, so we copy each `host/<pkg>@<ver>.wit` into
-//! `wit-staging/deps/astrid-<pkg>/<pkg>@<ver>.wit`. The synthetic
+//! `wit-staging/deps/astrid-<pkg>@<ver>/<pkg>@<ver>.wit` — keyed by the
+//! full `<pkg>@<ver>` stem so a package can ship multiple frozen versions
+//! (e.g. `http@1.0.0` + `http@1.1.0`) side by side. The synthetic
 //! `capsule` world that imports every host package and includes every
 //! guest export world is supplied via the `inline:` option in
 //! `src/lib.rs`.
@@ -106,10 +108,20 @@ fn main() {
         {
             continue;
         }
+        // Key each deps dir by the FULL `<pkg>@<version>` stem, not just
+        // `<pkg>`. A package may now ship multiple frozen versions side by
+        // side (e.g. `http@1.0.0.wit` + `http@1.1.0.wit`). wit-bindgen
+        // resolves one package per `deps/<dir>/`, and rejects two files
+        // declaring different `(package, version)` identifiers in the same
+        // dir ("package identifier `astrid:http@1.1.0` does not match
+        // previous package name of `astrid:http@1.0.0`"). Staging each
+        // version in its own `deps/astrid-<pkg>@<version>/` keeps every
+        // frozen version independently resolvable, so a capsule pinned at
+        // the old version keeps its old interface while the inline `world`
+        // imports whichever version it names.
         let stem = file_name.trim_end_matches(".wit");
-        let pkg_name = stem.split('@').next().unwrap();
-        let dst_dir = deps.join(format!("astrid-{pkg_name}"));
-        fs::create_dir_all(&dst_dir).expect("mkdir deps/astrid-<pkg>");
+        let dst_dir = deps.join(format!("astrid-{stem}"));
+        fs::create_dir_all(&dst_dir).expect("mkdir deps/astrid-<pkg>@<ver>");
         let dst = dst_dir.join(file_name);
         fs::copy(&path, &dst).expect("copy host wit");
         println!("cargo:rerun-if-changed={}", path.display());

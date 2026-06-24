@@ -11,6 +11,22 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Added
 
+- **`astrid:http@1.1.0` per-request controls.** The `http` module moves to the additive `@1.1.0`
+  host interface; an unset option reproduces `@1.0.0` behaviour exactly. New `Request` builders:
+  `.timeout(Duration)` (total), `.connect_timeout`, `.first_byte_timeout`, `.read_timeout`
+  (between-bytes / per-chunk on the streaming path); `.redirect(RedirectPolicy)` with the public
+  `RedirectPolicy { Follow, Error, Manual }` and `.max_redirects(u32)`; `.max_response_bytes(u64)`,
+  `.max_decompressed_bytes(u64)` (decompression-bomb cap), `.auto_decompress(bool)`; `.https_only()`
+  and `.integrity(impl Into<String>)` (`sha256-<base64>` subresource integrity). Timeouts are
+  defaults the host may clamp; redirects / sizes / scheme are ceilings the host enforces. `send` and
+  `stream_start` now thread these through `http-request-opts` / `http-stream-start-opts`. `Response`
+  gains `@1.1.0` metadata accessors: `.final_url()`, `.redirect_count()`, `.elapsed()`,
+  `.wire_bytes()`. The new `error-code` arms (`redirect-blocked`, `too-many-redirects`,
+  `integrity-mismatch`, `scheme-denied`, `decompression-bomb`, `dns-error`, `tls-error`) surface
+  through `SysError::HostError` carrying the arm name, consistent with the existing http error
+  mapping. The streaming-upload (`http-upload-start`) and stream `trailers` host surfaces are
+  deferred until the host implements them. (`unicity-astrid/wit#17`)
+
 - **Read-only file injection on the spawn builder.** `Command::inject_env_file(env_var, content)`
   (OS-agnostic: host materializes the bytes at a host-owned path and points the named env var at
   it), `Command::inject_file_at(path, content)` (Linux-only ro-bind at an absolute in-sandbox path;
@@ -21,12 +37,20 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Changed
 
-- **Bumped the `contracts` submodule to `0a50cfc`** (canonical wit `main` with #14 un-stubbed
-  persistent stdin and #15 process file-injection). `build.rs` re-stages `wit-staging` from
-  `contracts/host`, so `astrid:process@1.0.0` now carries `spawn-request.file-injections`. This
-  restores WIT/linker lockstep with core: a process-tier capsule built against the SDK previously
-  got an older `process@1.0.0` than the host exposes. The `astrid-contracts.wit` events bundle is
-  unchanged (file-injection is a `host/` contract, not an `interfaces/` one).
+- **Bumped the `contracts` submodule to `812c833`** (canonical wit `main` with #14 un-stubbed
+  persistent stdin, #15 process file-injection, #17 `astrid:http@1.1.0`, and #16 session 1.1.0).
+  `build.rs` re-stages `wit-staging` from `contracts/host`, so `astrid:process@1.0.0` carries
+  `spawn-request.file-injections` and `astrid:http@1.1.0` is now linkable, restoring WIT/linker
+  lockstep with core. The `astrid-contracts.wit` events bundle now reflects the new session 1.1.0
+  records (`session.v1.{list,get_meta,update,delete,search}`); `astrid:http` is a `host/` package and
+  is not in the `interfaces/` bundle.
+
+- **`astrid-sys` stages each frozen WIT version in its own `deps/astrid-<pkg>@<version>/` dir.**
+  `astrid:http` now ships two versions side by side (`http@1.0.0.wit` + `http@1.1.0.wit`); the prior
+  staging keyed every dep dir by package name alone, so both files landed in `deps/astrid-http/` and
+  `wit-bindgen` rejected the second (`package identifier astrid:http@1.1.0 does not match previous
+  package name of astrid:http@1.0.0`). Keying by `name@version` lets multiple frozen versions of one
+  package coexist; the SDK imports only `@1.1.0`. No public-API impact.
 
 ## [0.7.1] - 2026-06-10
 
