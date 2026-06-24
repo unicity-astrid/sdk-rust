@@ -28,12 +28,14 @@
 //!
 //! ## ABI evolution
 //!
-//! Every package imported here is pinned at `@1.0.0`. When a new
-//! frozen version ships (e.g. `host/ipc@1.1.0.wit`), add it to the
-//! inline world as an additional `import` — the Component Model
-//! linker enforces exact `(package, version)` matches, so capsules
-//! pinned at the older version continue to resolve their old
-//! interface unchanged.
+//! Most packages imported here are pinned at `@1.0.0`; `astrid:http`
+//! moves to `@1.1.0` (an additive superset of `@1.0.0`). When a new
+//! frozen version ships (e.g. `host/http@1.1.0.wit`), point the inline
+//! world's `import` at the new version — the Component Model linker
+//! enforces exact `(package, version)` matches. `build.rs` stages each
+//! frozen version in its own `deps/astrid-<pkg>@<version>/` dir, so
+//! multiple versions of one package coexist without a package-name
+//! collision and an older pin keeps resolving its old interface.
 
 #![deny(clippy::all)]
 #![deny(unreachable_pub)]
@@ -73,7 +75,7 @@ mod generated {
                 import astrid:ipc/host@1.0.0;
                 import astrid:kv/host@1.0.0;
                 import astrid:net/host@1.0.0;
-                import astrid:http/host@1.0.0;
+                import astrid:http/host@1.1.0;
                 import astrid:sys/host@1.0.0;
                 import astrid:process/host@1.0.0;
                 import astrid:uplink/host@1.0.0;

@@ -575,6 +575,26 @@ interface registry {
 /// A capsule exporting this interface handles `session.v1.request.*`
 /// events and publishes `session.v1.response.*` replies scoped by
 /// correlation ID.
+///
+/// ## 1.1.0 — conversation management
+///
+/// Additive over 1.0.0 (existing records unchanged). Adds the full
+/// thread-management surface a multi-device client and the agent need:
+/// - `list` (`session.v1.request.list`) — paginated thread metadata.
+/// - `get-meta` (`session.v1.request.get_meta`) — one thread's metadata.
+/// - `update` (`session.v1.request.update`) — patch title / archived /
+///   client `meta`; `rename` and `archive` are both expressed through it.
+/// - `delete` (`session.v1.request.delete`) — hard-purge a thread.
+/// - `search` (`session.v1.request.search`) — keyword/substring across the
+///   caller's transcripts.
+///
+/// All scoped per principal by the kernel KV namespace — no cross-principal
+/// access. Mutations also fan out a `session-event` on
+/// `session.v1.event.<kind>`, stamped with the acting principal, so other
+/// devices update their thread list live. `session-summary` and `update`
+/// carry an opaque `meta` string (client-defined JSON — tags, pin,
+/// read-state) the capsule stores but never interprets: the forward-compat
+/// escape hatch so new per-thread attributes need no contract bump.
 interface session {
     use types.{message};
 
@@ -618,6 +638,182 @@ interface session {
     record session-cleared {
         /// Session ID that was cleared.
         session-id: string,
+    }
+
+    /// Request to list the caller's sessions (paginated). The handler
+    /// enumerates only the invoking principal's sessions — the kernel scopes
+    /// the capsule's key-value namespace per principal, so there is no
+    /// cross-principal enumeration. Topic: `session.v1.request.list`.
+    record list-request {
+        correlation-id: string,
+        /// Opaque pagination cursor from a previous `list-response`, or absent
+        /// for the first page.
+        cursor: option<string>,
+        /// Maximum sessions to return in this page. The host caps the
+        /// effective value; absent means the server default.
+        limit: option<u32>,
+        /// Include archived threads. Default (false) returns only active ones.
+        include-archived: bool,
+    }
+
+    /// Metadata describing one session — no transcript body. Display name
+    /// fallback chain: `title` → `preview` → session-id.
+    record session-summary {
+        /// Session identifier (e.g. `default` or a UUID for chained sessions).
+        session-id: string,
+        /// User/operator-set thread title. Absent until set via `update`.
+        title: option<string>,
+        /// Preview of the FIRST user message, truncated — a stable auto-name
+        /// when no `title` is set.
+        preview: option<string>,
+        /// Preview of the MOST RECENT message, truncated — the recent-activity
+        /// snippet a thread-list row shows.
+        last-message-preview: option<string>,
+        /// Number of messages currently in the session.
+        message-count: u32,
+        /// Unix epoch seconds the session was first written, if known. Absent
+        /// for legacy sessions predating timestamp tracking.
+        created-at: option<u64>,
+        /// Unix epoch seconds of the most recent write, if known. Absent for
+        /// legacy sessions until their next write.
+        updated-at: option<u64>,
+        /// True if archived (hidden from the default list, data retained).
+        /// Toggle via `update`.
+        archived: bool,
+        /// Parent session id if this session descends from a cleared or
+        /// compacted ancestor.
+        parent-session-id: option<string>,
+        /// Opaque client-defined JSON (tags, pin, per-device read-state, …),
+        /// stored verbatim and never interpreted by the capsule, size-bounded.
+        /// The forward-compat escape hatch for per-thread attributes.
+        meta: option<string>,
+    }
+
+    /// Response with a page of session summaries, scoped by correlation ID.
+    /// Topic: `session.v1.response.list.<correlation-id>`.
+    record list-response {
+        correlation-id: string,
+        /// The page of sessions, ordered by session key. Each carries
+        /// `updated-at` for client-side recency sorting within the page.
+        sessions: list<session-summary>,
+        /// Opaque cursor for the next page, or absent on the last page.
+        next-cursor: option<string>,
+        /// Total thread count for the principal when cheaply known (absent if
+        /// the set is too large to count in one pass).
+        total: option<u32>,
+    }
+
+    /// Request for one thread's metadata (no transcript).
+    /// Topic: `session.v1.request.get_meta`.
+    record get-meta-request {
+        correlation-id: string,
+        session-id: string,
+    }
+
+    /// Response with one thread's metadata, or absent if no such thread in the
+    /// caller's namespace. Topic: `session.v1.response.get_meta.<correlation-id>`.
+    record get-meta-response {
+        correlation-id: string,
+        session: option<session-summary>,
+    }
+
+    /// Patch a thread's mutable metadata: a present field is applied, an absent
+    /// field left unchanged; `title`/`meta` set to an empty string clear that
+    /// attribute. `rename` and `archive` are both expressed through this verb.
+    /// Topic: `session.v1.request.update`.
+    record update-request {
+        correlation-id: string,
+        session-id: string,
+        /// New title; empty string clears it; absent leaves it unchanged.
+        title: option<string>,
+        /// New archived state; absent leaves it unchanged.
+        archived: option<bool>,
+        /// New opaque client `meta`; empty string clears; absent unchanged.
+        meta: option<string>,
+    }
+
+    /// Response with the updated metadata, or absent if no such thread.
+    /// Topic: `session.v1.response.update.<correlation-id>`.
+    record update-response {
+        correlation-id: string,
+        session: option<session-summary>,
+    }
+
+    /// Hard-delete a thread: transcript and metadata are purged from the store
+    /// (irreversible), scoped to the caller's namespace. To hide a thread
+    /// reversibly, `update` its `archived` flag instead.
+    /// Topic: `session.v1.request.delete`.
+    record delete-request {
+        correlation-id: string,
+        session-id: string,
+    }
+
+    /// Response confirming deletion. `deleted` is false if no such thread
+    /// existed. Topic: `session.v1.response.delete.<correlation-id>`.
+    record delete-response {
+        correlation-id: string,
+        deleted: bool,
+    }
+
+    /// Keyword/substring search across the caller's transcripts
+    /// (case-insensitive). v1 is literal matching — relevance ranking is a
+    /// separate concern. Topic: `session.v1.request.search`.
+    record search-request {
+        correlation-id: string,
+        query: string,
+        /// Max hits to return; the host caps the effective value.
+        limit: option<u32>,
+        /// Opaque cursor from a previous `search-response`, or absent for the
+        /// first page.
+        cursor: option<string>,
+        /// Search archived threads too. Default (false) skips them.
+        include-archived: bool,
+    }
+
+    /// One search hit: the thread plus the matching excerpt.
+    record search-result {
+        session-id: string,
+        /// Thread title if set, for display.
+        title: option<string>,
+        /// Truncated excerpt around the first match in the thread.
+        snippet: option<string>,
+        /// Number of matching messages in the thread.
+        match-count: u32,
+        /// Recency, for client-side sort of the hit list.
+        updated-at: option<u64>,
+    }
+
+    /// Response with the search hits, scoped by correlation ID.
+    /// Topic: `session.v1.response.search.<correlation-id>`.
+    record search-response {
+        correlation-id: string,
+        results: list<search-result>,
+        /// Opaque cursor for the next page of hits, or absent on the last.
+        next-cursor: option<string>,
+    }
+
+    /// The kind of lifecycle change a `session-event` reports. A `variant`
+    /// (not a string) so new kinds extend the type cleanly.
+    variant session-event-kind {
+        /// A new thread was created (e.g. via `clear`).
+        created,
+        /// A thread's metadata changed (title / archived / meta).
+        updated,
+        /// A thread was hard-deleted.
+        deleted,
+    }
+
+    /// Fan-out notification that a thread's lifecycle changed, published by the
+    /// session capsule after a successful mutation and stamped with the acting
+    /// principal so a per-principal subscriber (e.g. the gateway's multi-device
+    /// live feed) sees only its own. Topic: `session.v1.event.<kind>`
+    /// (`created` / `updated` / `deleted`).
+    record session-event {
+        kind: session-event-kind,
+        session-id: string,
+        /// Post-change metadata, so a subscriber updates its thread list
+        /// without a re-fetch. Absent for `deleted`.
+        summary: option<session-summary>,
     }
 }
 
