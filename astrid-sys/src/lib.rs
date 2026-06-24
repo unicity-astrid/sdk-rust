@@ -76,7 +76,7 @@ mod generated {
                 import astrid:kv/host@1.0.0;
                 import astrid:net/host@1.0.0;
                 import astrid:http/host@1.1.0;
-                import astrid:sys/host@1.0.0;
+                import astrid:sys/host@1.1.0;
                 import astrid:process/host@1.0.0;
                 import astrid:uplink/host@1.0.0;
                 import astrid:elicit/host@1.0.0;
@@ -148,7 +148,7 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
     let mut written = 0usize;
     while written < len {
         let want = core::cmp::min(CHUNK, len - written);
-        let chunk = generated::astrid::sys::host::random_bytes(want as u64)
+        let chunk = generated::astrid::sys1_1_0::host::random_bytes(want as u64)
             .map_err(|_| getrandom::Error::new_custom(1))?;
         if chunk.is_empty() {
             return Err(getrandom::Error::new_custom(2));

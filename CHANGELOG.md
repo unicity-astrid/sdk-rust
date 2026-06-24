@@ -11,6 +11,15 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Added
 
+- **`runtime::capsule_set_epoch()` — loaded-capsule-set fingerprint.** The `sys` module moves to the
+  additive `astrid:sys@1.1.0` superset (every `@1.0.0` call preserved; the host backs both). New call
+  returns a `CapsuleSetEpoch` (serde-transparent newtype over `u64`) that moves whenever a capsule is
+  installed, removed, or upgraded, is load-order independent, and is restart-stable for an unchanged
+  set. Lets a capsule that caches set-derived data (e.g. a describe-fan-out tool list) store the epoch
+  beside the cache and re-derive only when it moves — picking up a runtime install without waiting on a
+  per-principal invalidation broadcast a backend-mediated principal may never receive. Infallible (`0`
+  when the registry is momentarily unavailable). (`unicity-astrid/astrid#982`)
+
 - **`astrid:http@1.1.0` per-request controls.** The `http` module moves to the additive `@1.1.0`
   host interface; an unset option reproduces `@1.0.0` behaviour exactly. New `Request` builders:
   `.timeout(Duration)` (total), `.connect_timeout`, `.first_byte_timeout`, `.read_timeout`

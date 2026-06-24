@@ -57,7 +57,11 @@ use astrid_sys::astrid::ipc::host as wit_ipc;
 use astrid_sys::astrid::kv::host as wit_kv;
 use astrid_sys::astrid::net::host as wit_net;
 use astrid_sys::astrid::process::host as wit_process;
-use astrid_sys::astrid::sys::host as wit_sys;
+// `sys` moved to the @1.1.0 superset (adds `capsule-set-epoch`, every @1.0.0
+// call preserved). With `sys@1.0.0` and `sys@1.1.0` staged side by side,
+// wit-bindgen disambiguates the generated module by version (`sys1_1_0`); the
+// alias absorbs that so every sys wrapper keeps referring to `wit_sys`.
+use astrid_sys::astrid::sys1_1_0::host as wit_sys;
 use astrid_sys::astrid::uplink::host as wit_uplink;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -468,6 +472,35 @@ pub mod runtime {
     pub fn random_bytes(length: usize) -> Result<Vec<u8>, SysError> {
         let len = u64::try_from(length).unwrap_or(u64::MAX);
         wit_sys::random_bytes(len).map_err(host_err)
+    }
+
+    /// A stable fingerprint of the currently-loaded capsule set — the value
+    /// returned by [`capsule_set_epoch`].
+    ///
+    /// Opaque: its only meaning is equality. Two reads returning the same epoch
+    /// mean the loaded set is unchanged; a different epoch means a capsule was
+    /// installed, removed, or upgraded in between. Serde-transparent so it can
+    /// be persisted beside set-derived cached data.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    #[serde(transparent)]
+    pub struct CapsuleSetEpoch(pub u64);
+
+    /// Return a stable fingerprint of the currently-loaded capsule set.
+    ///
+    /// The epoch moves whenever a capsule is installed, removed, or upgraded; it
+    /// is independent of load order and stable across daemon restarts for an
+    /// unchanged set. A capsule that caches data derived from the loaded set —
+    /// e.g. a tool-schema list collected by describe fan-out — can store the
+    /// epoch beside the cache and re-validate cheaply on its next turn,
+    /// re-deriving only when the live epoch differs from the stored one. That
+    /// picks up a runtime install without waiting on a per-principal
+    /// invalidation broadcast (which a backend-mediated principal may never
+    /// receive). Infallible: `0` if the registry is momentarily unavailable, a
+    /// value that won't match a populated cache's stored epoch and so biases
+    /// toward a refresh rather than stale reuse.
+    #[must_use]
+    pub fn capsule_set_epoch() -> CapsuleSetEpoch {
+        CapsuleSetEpoch(wit_sys::capsule_set_epoch())
     }
 }
 
