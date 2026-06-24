@@ -2,7 +2,7 @@
 //!
 //! This crate generates typed guest bindings from the per-domain WIT
 //! packages in `contracts/host/` (the `unicity-astrid/wit` submodule).
-//! `build.rs` stages those files into `wit-staging/deps/astrid-<pkg>/`;
+//! `build.rs` stages those files into `wit-staging/deps/astrid-<pkg>@<version>/`;
 //! a single [`wit_bindgen::generate!`] invocation then emits one Rust
 //! module per package under a synthetic `capsule` world that imports
 //! every host package and includes every guest export world.

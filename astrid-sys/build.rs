@@ -7,7 +7,9 @@
 //!
 //! wit-bindgen expects a single root directory with one package per
 //! `deps/<name>/` subdir, so we copy each `host/<pkg>@<ver>.wit` into
-//! `wit-staging/deps/astrid-<pkg>/<pkg>@<ver>.wit`. The synthetic
+//! `wit-staging/deps/astrid-<pkg>@<ver>/<pkg>@<ver>.wit` — keyed by the
+//! full `<pkg>@<ver>` stem so a package can ship multiple frozen versions
+//! (e.g. `http@1.0.0` + `http@1.1.0`) side by side. The synthetic
 //! `capsule` world that imports every host package and includes every
 //! guest export world is supplied via the `inline:` option in
 //! `src/lib.rs`.
