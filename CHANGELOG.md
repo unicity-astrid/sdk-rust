@@ -9,6 +9,8 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-28
+
 ### Added
 
 - **`astrid:http@1.1.0` per-request controls.** The `http` module moves to the additive `@1.1.0`
