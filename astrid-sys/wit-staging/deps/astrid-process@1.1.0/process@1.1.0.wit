@@ -66,8 +66,10 @@ interface host {
         /// Per-principal CONCURRENT background-process cap exhausted (shared
         /// between ephemeral `spawn-background` and `spawn-persistent`).
         quota,
-        /// Stdin payload exceeded the per-call 1 MB cap or the
-        /// cumulative-per-process write quota.
+        /// Payload exceeded the applicable cap: the 4 MiB
+        /// `spawn-request.stdin` prelude (per spawn, cumulative), the
+        /// 1 MiB per-call `write-stdin` limit, or the cumulative
+        /// per-process write quota.
         too-large,
         /// Handle has been closed (process exited and reaped).
         closed,
