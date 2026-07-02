@@ -1,6 +1,7 @@
 //! Sandboxed host process spawning.
 //!
-//! Backed by `astrid:process/host@1.0.0`. Synchronous spawns return
+//! Backed by `astrid:process/host@1.1.0` (requires a host that serves
+//! it — astrid >= 0.9.1). Synchronous spawns return
 //! [`Output`]; background spawns return a RAII [`Process`] handle that
 //! drops the kernel-side resource — and reaps the child — when the
 //! handle goes out of scope. Per-capsule cap: 8 concurrent background

@@ -77,7 +77,7 @@ mod generated {
                 import astrid:net/host@1.0.0;
                 import astrid:http/host@1.1.0;
                 import astrid:sys/host@1.0.0;
-                import astrid:process/host@1.0.0;
+                import astrid:process/host@1.1.0;
                 import astrid:uplink/host@1.0.0;
                 import astrid:elicit/host@1.0.0;
                 import astrid:approval/host@1.0.0;
