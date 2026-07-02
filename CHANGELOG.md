@@ -33,17 +33,22 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
   rejected on macOS), and the lower-level `Command::inject_file(content, placement)` with the public
   `InjectionPlacement { EnvPointer, FixedPath }`. The injected bytes are exposed read-only and are
   unmodifiable by the child, its subprocesses, or the spawning principal's `fs` surface. Honored by
-  all spawn modes. (`unicity-astrid/astrid#881`/`#890`)
+  all spawn modes. The injection surface rides `astrid:process@1.1.0`: the SDK's `process` module now
+  binds that version, so a capsule rebuilt against this SDK imports `astrid:process/host@1.1.0` and
+  requires a host that serves it (astrid ≥ 0.9.1). (`unicity-astrid/astrid#881`/`#890`)
 
 ### Changed
 
-- **Bumped the `contracts` submodule to `812c833`** (canonical wit `main` with #14 un-stubbed
-  persistent stdin, #15 process file-injection, #17 `astrid:http@1.1.0`, and #16 session 1.1.0).
-  `build.rs` re-stages `wit-staging` from `contracts/host`, so `astrid:process@1.0.0` carries
-  `spawn-request.file-injections` and `astrid:http@1.1.0` is now linkable, restoring WIT/linker
-  lockstep with core. The `astrid-contracts.wit` events bundle now reflects the new session 1.1.0
-  records (`session.v1.{list,get_meta,update,delete,search}`); `astrid:http` is a `host/` package and
-  is not in the `interfaces/` bundle.
+- **Bumped the `contracts` submodule to `278dbca`** (canonical wit `main` with #14 un-stubbed
+  persistent stdin, #17 `astrid:http@1.1.0`, #16 session 1.1.0, and #20 — process file-injection
+  moved off the frozen `astrid:process@1.0.0` onto a new additive `astrid:process@1.1.0`). #20
+  restores `astrid:process@1.0.0` byte-for-byte to its published shape (the in-place mutation from
+  wit#15 had structurally broken every capsule built against the published contract — see
+  `unicity-astrid/astrid#1107`). `build.rs` re-stages `wit-staging` from `contracts/host`; the
+  `process` host import in the `astrid-sys` `world capsule` moves from `@1.0.0` to `@1.1.0` (mirroring
+  the earlier `http` move), so the SDK exposes the injection surface while `@1.0.0`-built capsules
+  keep loading unchanged on the dual-version host. The `astrid-contracts.wit` events bundle is
+  unaffected (`astrid:process` is a `host/` package, not in the `interfaces/` bundle).
 
 - **`astrid-sys` stages each frozen WIT version in its own `deps/astrid-<pkg>@<version>/` dir.**
   `astrid:http` now ships two versions side by side (`http@1.0.0.wit` + `http@1.1.0.wit`); the prior
