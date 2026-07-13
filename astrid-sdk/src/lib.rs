@@ -186,7 +186,7 @@ pub mod fs;
 ///
 /// These types are the standard payloads for cross-capsule IPC topics
 /// (LLM requests, session messages, registry events, etc.). They are
-/// generated from the `unicity-astrid/wit` repository which defines
+/// generated from the `astrid-runtime/wit` repository which defines
 /// the canonical WIT interfaces.
 ///
 /// Capsule authors use these types with [`ipc::publish_json`] instead

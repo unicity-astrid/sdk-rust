@@ -2,7 +2,7 @@
 //!
 //! Stages the WIT submodule into a layout `wit_bindgen::generate!` can
 //! resolve. The canonical WIT lives at `sdk-rust/contracts/` (a submodule
-//! of `unicity-astrid/wit`) with per-domain packages under `host/` and
+//! of `astrid-runtime/wit`) with per-domain packages under `host/` and
 //! the guest-side lifecycle worlds under `host/guest@1.0.0.wit`.
 //!
 //! wit-bindgen expects a single root directory with one package per
@@ -48,7 +48,7 @@ fn main() {
     let staging = crate_root.join("wit-staging");
     let deps = staging.join("deps");
 
-    // Published-crate path: the `unicity-astrid/wit` submodule isn't
+    // Published-crate path: the `astrid-runtime/wit` submodule isn't
     // available on a consumer's machine. The committed `wit-staging/`
     // ships with the crate; `src/lib.rs`'s `wit_bindgen::generate!`
     // reads it directly. Skip the stage step.

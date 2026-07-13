@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sync astrid-sdk/wit/astrid-contracts.wit from the canonical
-# unicity-astrid/wit submodule (at contracts/interfaces/*.wit).
+# astrid-runtime/wit submodule (at contracts/interfaces/*.wit).
 #
 # Why this exists, in two parts:
 #
@@ -59,7 +59,7 @@ generate() {
 // Concatenated from contracts/interfaces/*.wit by
 // scripts/sync-contracts-wit.sh.
 //
-// Source of truth: unicity-astrid/wit (git submodule at contracts/).
+// Source of truth: astrid-runtime/wit (git submodule at contracts/).
 // Run `scripts/sync-contracts-wit.sh` after pulling the submodule to
 // regenerate this file; CI fails if it drifts from the canonical set.
 
