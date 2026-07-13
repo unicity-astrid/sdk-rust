@@ -3,7 +3,7 @@
 // Concatenated from contracts/interfaces/*.wit by
 // scripts/sync-contracts-wit.sh.
 //
-// Source of truth: unicity-astrid/wit (git submodule at contracts/).
+// Source of truth: astrid-runtime/wit (git submodule at contracts/).
 // Run `scripts/sync-contracts-wit.sh` after pulling the submodule to
 // regenerate this file; CI fails if it drifts from the canonical set.
 
@@ -1463,4 +1463,3 @@ interface users {
         error: option<string>,
     }
 }
-

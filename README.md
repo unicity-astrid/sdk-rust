@@ -3,7 +3,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![MSRV: 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](https://www.rust-lang.org)
 
-**The Rust SDK for building [Astrid](https://github.com/unicity-astrid/astrid) capsules.**
+**The Rust SDK for building [Astrid](https://github.com/astrid-runtime/astrid) capsules.**
 
 In the OS model, this is the standard library for user-space processes. It gives capsule authors safe, typed access to every kernel service: filesystem, IPC, networking, storage, approval, scheduling, and more. Capsule authors depend on `astrid-sdk` and `serde`. Everything else is handled.
 
