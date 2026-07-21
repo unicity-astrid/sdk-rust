@@ -82,6 +82,7 @@ mod generated {
                 import astrid:elicit/host@1.0.0;
                 import astrid:approval/host@1.0.0;
                 import astrid:identity/host@1.0.0;
+                import astrid:compute/host@1.0.0;
 
                 include astrid:guest/interceptor@1.0.0;
                 include astrid:guest/background@1.0.0;

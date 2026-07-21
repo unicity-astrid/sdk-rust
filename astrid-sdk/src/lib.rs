@@ -45,6 +45,7 @@
 // the `wit_<domain>` names the wrappers use so most call sites stay
 // touched only in their error-mapping code.
 use astrid_sys::astrid::approval::host as wit_approval;
+use astrid_sys::astrid::compute::host as wit_compute;
 use astrid_sys::astrid::elicit::host as wit_elicit;
 use astrid_sys::astrid::fs::host as wit_fs;
 // `http` moved to @1.1.0. With both `http@1.0.0` and `http@1.1.0`
@@ -303,6 +304,9 @@ pub mod uplink {
 
 /// The KV Airlock — Persistent Key-Value Storage
 pub mod kv;
+
+/// Principal-scoped execution of signed core-Wasm workers.
+pub mod compute;
 
 /// The HTTP Airlock — External Network Requests
 /// Outbound HTTP — typed request API over the host HTTP airlock.
