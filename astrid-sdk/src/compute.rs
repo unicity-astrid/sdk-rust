@@ -64,12 +64,15 @@ pub struct GroupRequest {
     pub parallelism: Parallelism,
     /// Initial shared-memory size in 64-KiB pages.
     pub initial_memory_pages: u32,
-    /// Maximum shared-memory size in 64-KiB pages.
+    /// Maximum shared-memory size in 64-KiB pages. Zero requests automatic
+    /// admission from the host's current principal and process-wide capacity.
     pub maximum_memory_pages: u32,
 }
 
 impl GroupRequest {
-    /// Construct an explicit request. Memory sizes are never guessed by the SDK.
+    /// Construct a request. A nonzero maximum is explicit; zero delegates the
+    /// maximum to host admission and can be selected more clearly with
+    /// [`Self::auto_memory`].
     pub fn new(
         worker: impl Into<String>,
         initial_memory_pages: u32,
@@ -82,6 +85,17 @@ impl GroupRequest {
             initial_memory_pages,
             maximum_memory_pages,
         }
+    }
+
+    /// Ask the host to resolve the effective shared-memory maximum.
+    ///
+    /// The host intersects its process-wide pool, current reservations, the
+    /// verified principal's policy, and the signed worker declaration. Read the
+    /// admitted value from [`ComputeGroup::info`] after opening the group.
+    #[must_use]
+    pub fn auto_memory(mut self) -> Self {
+        self.maximum_memory_pages = 0;
+        self
     }
 
     /// Permit concurrent execution and choose a worker-count policy.
@@ -368,6 +382,10 @@ mod tests {
         let request = GroupRequest::new("linux-vcpu", 1024, 8192).parallel(Parallelism::AtMost(8));
         assert_eq!(request.mode, ExecutionMode::Parallel);
         assert_eq!(request.parallelism, Parallelism::AtMost(8));
+
+        let automatic = GroupRequest::new("linux-vcpu", 1024, 8192).auto_memory();
+        assert_eq!(automatic.initial_memory_pages, 1024);
+        assert_eq!(automatic.maximum_memory_pages, 0);
 
         let descriptor = WorkDescriptor::new(64, 4096, 7)
             .on_worker(3)

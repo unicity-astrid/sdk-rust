@@ -14,8 +14,10 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 - **Experimental generic compute-group SDK.** Capsules can open signed
   `compute-worker` objects, exchange bulk data through shared memory, submit
   affinity-aware jobs, inspect accounting, cancel, and join through the
-  pre-1.0 `astrid:compute@1.0.0` draft. The WIT contract remains deliberately
-  unmerged until Astrid 1.0.
+  pre-1.0 `astrid:compute@1.0.0` draft. `GroupRequest::auto_memory()` uses the
+  existing zero-maximum sentinel so the host can resolve current worker,
+  principal, and process-wide capacity without changing the held WIT record.
+  The WIT contract remains deliberately unmerged until Astrid 1.0.
 
 - **`astrid:http@1.1.0` per-request controls.** The `http` module moves to the additive `@1.1.0`
   host interface; an unset option reproduces `@1.0.0` behaviour exactly. New `Request` builders:
