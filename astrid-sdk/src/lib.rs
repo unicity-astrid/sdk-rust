@@ -196,6 +196,7 @@ pub mod contracts {
     astrid_sdk_macros::wit_events!("wit/astrid-contracts.wit");
 }
 
+pub mod io;
 /// Event bus messaging (like `std::sync::mpsc` but topic-based).
 pub mod ipc;
 
@@ -661,6 +662,7 @@ pub mod prelude {
         http,
         identity,
         interceptors,
+        io,
         ipc,
         kv,
         log,

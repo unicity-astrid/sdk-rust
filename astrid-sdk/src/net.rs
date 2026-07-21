@@ -115,6 +115,14 @@ pub struct UnixListener {
 }
 
 impl UnixListener {
+    /// Create a signal that becomes ready when a connection can be accepted.
+    ///
+    /// Drop the returned pollable before dropping this listener.
+    #[must_use]
+    pub fn subscribe_readiness(&self) -> crate::io::Pollable {
+        crate::io::Pollable::new(self.inner.subscribe_readiness())
+    }
+
     /// Blocking accept of the next inbound Unix-domain connection.
     pub fn accept(&self) -> Result<TcpStream, SysError> {
         let inner = self.inner.accept().map_err(host_err)?;
@@ -169,6 +177,15 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
+    /// Create a signal that becomes ready when a read can make progress or the
+    /// peer has closed the connection.
+    ///
+    /// Drop the returned pollable before dropping this stream.
+    #[must_use]
+    pub fn subscribe_readable(&self) -> crate::io::Pollable {
+        crate::io::Pollable::new(self.inner.subscribe_readable())
+    }
+
     /// Open an outbound TCP connection to `host:port`.
     ///
     /// DNS resolution and the SSRF airlock run host-side; the WASM
