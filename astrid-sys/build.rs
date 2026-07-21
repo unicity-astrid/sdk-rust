@@ -127,7 +127,40 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
+    // Before 1.0, contract PRs intentionally remain unmerged in the canonical
+    // WIT repository. Keep those explicitly draft surfaces in an SDK-owned
+    // overlay so workspace builds can exercise them without changing the
+    // submodule pin. They use the same one-package-per-directory staging shape
+    // and may not replace a canonical file of the same name.
+    let experimental = crate_root.join("wit-experimental");
+    if let Ok(entries) = fs::read_dir(&experimental) {
+        for entry in entries {
+            let path = entry.expect("read experimental WIT entry").path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("wit"))
+            {
+                continue;
+            }
+            let stem = file_name.trim_end_matches(".wit");
+            let dst_dir = deps.join(format!("astrid-{stem}"));
+            fs::create_dir_all(&dst_dir).expect("mkdir experimental WIT package");
+            let destination = dst_dir.join(file_name);
+            assert!(
+                !destination.exists(),
+                "experimental WIT must not replace canonical package {}",
+                destination.display()
+            );
+            fs::copy(&path, &destination).expect("stage experimental WIT package");
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
     println!("cargo:rerun-if-changed={}", host_src.display());
+    println!("cargo:rerun-if-changed={}", experimental.display());
     println!("cargo:rerun-if-changed=build.rs");
     // CI environments may run `git submodule update` lazily; the
     // .gitmodules pointer changing without the working tree yet

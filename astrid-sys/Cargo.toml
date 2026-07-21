@@ -12,6 +12,7 @@ include = [
     "src/**/*",
     "build.rs",
     "wit-staging/**/*.wit",
+    "wit-experimental/**/*.wit",
     "Cargo.toml",
     "LICENSE-*",
     "README.md",
