@@ -66,7 +66,14 @@ fn main() {
             })
         })
         .unwrap_or(false);
-    if !has_wit_files {
+    // Cargo git/registry dependencies are immutable inputs from the consumer's
+    // perspective. Their build scripts must never rewrite the source checkout,
+    // even when Cargo happened to initialize the WIT submodule recursively.
+    // `CARGO_PRIMARY_PACKAGE` is set only when this package was explicitly
+    // selected in its own workspace; dependency builds consume the committed
+    // staging tree exactly like a published crate.
+    let is_primary_package = std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some();
+    if !has_wit_files || !is_primary_package {
         // Watch the same surface we'd watch in the staging path. Without
         // these, Cargo won't rerun build.rs after a developer runs
         // `git submodule update --init` against a fresh clone, so the
