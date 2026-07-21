@@ -11,6 +11,13 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Added
 
+- **Readiness multiplexing wrappers.** New `io::{Pollable, poll,
+  MAX_POLLABLES_PER_CALL}` safely expose the existing `astrid:io/poll@1.0.0`
+  host contract. `ipc::Subscription::subscribe_readiness`,
+  `net::UnixListener::subscribe_readiness`, and
+  `net::TcpStream::subscribe_readable` let run-loop capsules wait once across
+  heterogeneous resources instead of timeout-scanning every handle.
+
 - **`astrid:http@1.1.0` per-request controls.** The `http` module moves to the additive `@1.1.0`
   host interface; an unset option reproduces `@1.0.0` behaviour exactly. New `Request` builders:
   `.timeout(Duration)` (total), `.connect_timeout`, `.first_byte_timeout`, `.read_timeout`

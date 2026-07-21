@@ -26,6 +26,14 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    /// Create a signal that becomes ready when messages are queued.
+    ///
+    /// Drop the returned pollable before dropping this subscription.
+    #[must_use]
+    pub fn subscribe_readiness(&self) -> crate::io::Pollable {
+        crate::io::Pollable::new(self.inner.subscribe_readiness())
+    }
+
     /// Non-blocking poll for messages queued since the last
     /// `poll` / `recv` on this subscription.
     pub fn poll(&self) -> Result<PollResult, SysError> {
