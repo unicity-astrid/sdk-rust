@@ -12,8 +12,8 @@ include = ["src/**/*", "wit/**/*", "Cargo.toml", "LICENSE-*", "README.md"]
 [dependencies]
 astrid-sdk-macros = { workspace = true, optional = true }
 astrid-sys = { workspace = true }
-astrid-types = { workspace = true }
 borsh = { version = "1.0.0", features = ["derive"] }
+chrono = { workspace = true }
 schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,7 +22,7 @@ thiserror = { workspace = true }
 # routes v4 through `getrandom`, which astrid-sys configures with a
 # custom backend on `wasm32-unknown-unknown` that calls
 # `astrid:sys.random-bytes`.
-uuid = { version = "1.10", default-features = false, features = ["v4", "rng-getrandom"] }
+uuid = { version = "1.10", default-features = false, features = ["v4", "serde", "rng-getrandom"] }
 
 [features]
 default = ["derive"]

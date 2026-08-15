@@ -39,6 +39,12 @@ Changelog tracking starts with 0.2.0. Prior versions were not tracked.
 
 ### Changed
 
+- **The SDK now owns its capsule-facing IPC and LLM Rust types.** The existing
+  `astrid_sdk::types::{ipc,llm}` paths and direct re-exports are preserved, but
+  `astrid-sdk` no longer depends on core's separately published `astrid-types`
+  crate. Canonical WIT and serialized wire shapes remain the compatibility
+  boundary; golden tests pin the legacy capsule-facing JSON forms. (#66)
+
 - **Bumped the `contracts` submodule to `278dbca`** (canonical wit `main` with #14 un-stubbed
   persistent stdin, #17 `astrid:http@1.1.0`, #16 session 1.1.0, and #20 — process file-injection
   moved off the frozen `astrid:process@1.0.0` onto a new additive `astrid:process@1.1.0`). #20

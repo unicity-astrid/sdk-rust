@@ -20,7 +20,7 @@ include = [
 [dependencies]
 wit-bindgen = { version = "0.54", default-features = false, features = ["macros"] }
 serde = { version = "1.0", features = ["derive"] }
-# Pulled in transitively by `astrid-types`/`uuid`. We register a custom
+# Pulled in transitively by `uuid`. We register a custom
 # backend that routes to `astrid:sys/host.random-bytes` so capsules
 # building for `wasm32-unknown-unknown` (the Astrid-canonical target —
 # zero `wasi:*` imports) get a working RNG without ever touching the

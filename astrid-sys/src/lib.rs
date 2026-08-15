@@ -124,7 +124,7 @@ pub use generated::*;
 // zero `wasi:*` imports, so every kernel call shows in
 // `astrid.audit.*` and the WIT imports list IS the capsule's literal
 // capability list. The price is that `getrandom` (pulled in
-// transitively via `uuid` / `astrid-types`) has no platform backend on
+// transitively via `uuid`) has no platform backend on
 // that target — `HashMap` would panic on first insert without this
 // shim.
 //
