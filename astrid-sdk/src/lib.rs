@@ -63,44 +63,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-/// Shared Astrid data types (IPC payloads, LLM schemas, kernel API).
-///
-/// Re-exported from [`astrid_types`]. SDK-specific types like [`CallerContext`]
-/// are also available here.
-pub mod types {
-    use serde::{Deserialize, Serialize};
-
-    // Sub-modules (re-exported for `astrid_sdk::types::ipc::*` access).
-    //
-    // `kernel`/`kernel_api` is intentionally NOT re-exported here —
-    // those CLI ↔ daemon RPC types now live in `astrid_core::kernel_api`
-    // (post-PR#752 decoupling) and don't belong in capsule space.
-    // Capsules use `ipc` and `llm` types only.
-    pub use astrid_types::ipc;
-    pub use astrid_types::llm;
-
-    // IPC types
-    pub use astrid_types::ipc::{
-        IpcMessage, IpcPayload, OnboardingField, OnboardingFieldType, SelectionOption,
-    };
-
-    // LLM types
-    pub use astrid_types::llm::{
-        ContentPart, LlmResponse, LlmToolDefinition, Message, MessageContent, MessageRole,
-        StopReason, StreamEvent, ToolCall, ToolCallResult, Usage,
-    };
-
-    /// Identifies the caller that triggered the current capsule execution.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct CallerContext {
-        /// UUID of the capsule that originated the IPC message.
-        pub source_id: String,
-        /// The acting principal (user ID), if available.
-        pub principal: Option<String>,
-        /// ISO 8601 timestamp of the originating message.
-        pub timestamp: String,
-    }
-}
+/// Capsule-facing IPC and LLM wire types owned by this SDK.
+pub mod types;
 pub use borsh;
 pub use serde;
 pub use serde_json;
